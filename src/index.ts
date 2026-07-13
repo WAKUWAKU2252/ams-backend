@@ -1,7 +1,11 @@
-import { Elysia } from "elysia";
+import { env } from './config/env';
+import { AppDataSource } from './db/data-source';
+import { createApp } from './app';
 
-const app = new Elysia().get("/", () => "Hello Elysia").listen(3000);
+await AppDataSource.initialize();
+console.log(`✅ PostgreSQL connected: ${env.DB_HOST}:${env.DB_PORT}/${env.DB_NAME}`);
 
-console.log(
-  `🦊 Elysia is running at ${app.server?.hostname}:${app.server?.port}`
-);
+const app = createApp().listen(env.PORT);
+
+console.log(`🦊 AMS API running at http://localhost:${env.PORT}`);
+console.log(`📖 Swagger UI: http://localhost:${env.PORT}/swagger`);
