@@ -1,8 +1,8 @@
 import { env } from './config/env';
-import { AppDataSource } from './db/data-source';
+import { connectDb } from './db';
 import { createApp } from './app';
 
-await AppDataSource.initialize();
+await connectDb();
 console.log(`✅ PostgreSQL connected: ${env.DB_HOST}:${env.DB_PORT}/${env.DB_NAME}`);
 
 const app = createApp().listen(env.PORT);
