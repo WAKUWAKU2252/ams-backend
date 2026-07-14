@@ -5,6 +5,7 @@ import {
   varchar,
   date,
   foreignKey,
+  index,
   uuid,
   integer,
   numeric,
@@ -58,8 +59,10 @@ export const purchaseOrderItem = pgTable(
     foreignKey({
       columns: [table.poNumber],
       foreignColumns: [purchaseOrder.poNumber],
-      name: 'FK_7e3fa7a2be0c9935a02df288c4f',
+      name: 'fk_purchase_order_item_po_number',
     }).onDelete('cascade'),
+    // pg ไม่สร้าง index ให้ฝั่ง FK เอง — ต้องมีเพื่อ join items ของ PO และ cascade delete
+    index('idx_purchase_order_item_po_number').on(table.poNumber),
   ],
 );
 
@@ -76,8 +79,10 @@ export const grpoLine = pgTable(
     foreignKey({
       columns: [table.poItemId],
       foreignColumns: [purchaseOrderItem.id],
-      name: 'FK_9ff638afd167eb966af4fb339eb',
+      name: 'fk_grpo_line_po_item',
     }).onDelete('cascade'),
+    // pg ไม่สร้าง index ให้ฝั่ง FK เอง — ต้องมีเพื่อ join grpoLines ของ item และ cascade delete
+    index('idx_grpo_line_po_item_id').on(table.poItemId),
   ],
 );
 
