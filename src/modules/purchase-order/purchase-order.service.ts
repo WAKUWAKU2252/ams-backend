@@ -12,7 +12,7 @@ import { paginate } from '../../common/pagination';
 export function findAll() {
   return db.query.purchaseOrder.findMany({
     with: {
-      items: {
+      items: { 
         orderBy: (item, { asc }) => [asc(item.poLine)],
         with: { grpoLines: { orderBy: (line, { asc }) => [asc(line.grpoDate)] } },
       },

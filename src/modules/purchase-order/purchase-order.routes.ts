@@ -7,4 +7,4 @@ export const purchaseOrderRoutes = new Elysia({ prefix: '/purchase-orders' })
   .get('/:poNumber', ({ params }) => poService.findOneOrFail(params.poNumber), {
     params: poNumberParams,
   })
-  .get('/all',() => poService.findAll)
+  .get('/all',() => poService.findAll())
