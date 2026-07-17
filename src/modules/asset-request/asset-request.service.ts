@@ -1,0 +1,130 @@
+// ═══ asset-request.service.ts — สมองของ module ═══
+// กฎเหล็กเดิม: TypeScript ล้วน ห้าม import จาก 'elysia' / ห้าม any / error โยน AppError
+//
+// [วิธีคิดของ createDraft — ลำดับการตรวจคือการเล่าเหตุผลทางธุรกิจ]
+// การสร้าง draft ไม่ใช่แค่ INSERT — มันคือการตอบคำถาม 3 ข้อ "ตามลำดับ":
+//   Q1 เป้าที่ชี้มีจริงไหม?           (PO ใบนี้มีตัวตน)               → ไม่มี  = 404
+//   Q2 เป้าพร้อมให้ลงทะเบียนไหม?     (มีสัก line ที่รับของแล้ว)        → ไม่พร้อม = 400
+//   Q3 PO นี้มี draft ค้างอยู่แล้วหรือเปล่า? (ใครสร้างไว้ก็ตาม)         → มี = คืนใบเดิมให้ทำต่อ
+// สังเกต: เรียงจากพื้นฐานสุดไปเฉพาะทางสุด และทุก error ต้องบอกสิ่งที่ผู้ใช้ "แก้ได้"
+// ("ยังไม่มีการรับของ" ผู้ใช้รู้ว่าต้องรอ GRPO — ต่างจาก "invalid request" ที่ไร้ประโยชน์)
+
+import { and, count, desc, eq, isNull } from 'drizzle-orm';
+import { db } from '../../db';
+import { assetRequest, purchaseOrder } from '../../db/schema';
+import { NotFoundError, BadRequestError } from '../../common/errors';
+import { paginate } from '../../common/pagination';
+import { listQuery } from './asset-request.schema';
+
+type ListQuery = typeof listQuery.static;
+
+export async function createDraft(poNumber: string, createBy: string) {
+  // [Q1] PO มีตัวตนไหม
+  const po = await db.query.purchaseOrder.findFirst({
+    where: eq(purchaseOrder.poNumber, poNumber),
+    with: {
+      items: {
+        with: { grpoLines: true },
+      },
+    },
+  });
+  if (!po) {
+    throw new NotFoundError(`Purchase order ${poNumber}`);
+  }
+
+  // [Q2] มีสัก line ที่ตรวจรับแล้วไหม
+  if (po.items.every((i) => i.grpoLines.length === 0)) {
+    throw new BadRequestError('PO นี้ยังไม่เคยมีการรับของ (GRPO) — ลงทะเบียนได้เฉพาะของที่ตรวจรับแล้ว');
+  }
+
+  // [Q2 ต่อ — โควตา] ยังทำไม่ได้เพราะตาราง asset ยังไม่เกิด:
+  // TODO(asset): เมื่อมีตาราง asset แล้ว เพิ่มเช็ค
+  //   registered = COUNT(asset WHERE grpo_line_id IN (...) AND deleted_at IS NULL)
+  //   ถ้า registered >= Σ receivedQty -> BadRequestError('รายการนี้ลงทะเบียนครบตามจำนวนรับแล้ว')
+
+  // [Q3 — lock ระดับ PO] กติกาธุรกิจ: PO หนึ่งใบมี draft ค้างได้ใบเดียวทั้งระบบ
+  // ใครกด Create ตอนมี draft ค้าง = รับใบเดิมไปทำต่อ (จงใจ "ไม่" กรอง createdBy)
+  // เงื่อนไขต้องตรงกับ partial unique index uq_asset_request_draft เป๊ะ:
+  // (poNumber) WHERE status='DRAFT' AND deleted_at IS NULL
+  // (ขาด isNull(deletedAt) = ไปคืนใบที่ถูกลบแล้ว)
+  const draftWhere = and(
+    eq(assetRequest.poNumber, poNumber),
+    eq(assetRequest.status, 'DRAFT'),
+    isNull(assetRequest.deletedAt),
+  );
+
+  const existingDraft = await db.query.assetRequest.findFirst({ where: draftWhere });
+  if (existingDraft) {
+    return { requestId: existingDraft.id, reused: true };
+  }
+
+  // field อื่นไม่ต้องใส่ — status/createdAt/updatedAt ใช้ default ของ DB (default อยู่ที่ schema ที่เดียว)
+  // การกันซ้ำมี 2 ชั้น: เช็คก่อน insert = กันเคสปกติ / partial unique index = กันเคสเบียด
+  // ถ้าแพ้ race (รหัส 23505 unique_violation) อย่าโยน 500 — query ใบที่ "ชนะ" มาคืนแทน
+  try {
+    const [inserted] = await db
+      .insert(assetRequest)
+      .values({ poNumber, createdBy: createBy })
+      .returning();
+    return { requestId: inserted.id, reused: false };
+  } catch (error) {
+    const isUniqueViolation =
+      typeof error === 'object' && error !== null && 'code' in error && error.code === '23505';
+    if (isUniqueViolation) {
+      const winner = await db.query.assetRequest.findFirst({ where: draftWhere });
+      if (winner) {
+        return { requestId: winner.id, reused: true };
+      }
+    }
+    throw error;
+  }
+}
+
+// พ่วง PO ทั้งใบมาเลยเพราะหน้าฟอร์มต้องคลี่ทุก line เป็นรายชิ้น (สั่ง/รับ/ลงแล้ว ต่อ line)
+// — ดึงจบใน request เดียว ดีกว่าให้ front ยิงเพิ่มอีกรอบ
+// (with ต้อง inline ในแต่ละ query ตามกติกา Drizzle ของโปรเจกต์ — แยก const แล้ว type หาย)
+export async function getDraftOrFail(id: number) {
+  const request = await db.query.assetRequest.findFirst({
+    where: and(eq(assetRequest.id, id), isNull(assetRequest.deletedAt)),
+    with: {
+      purchaseOrder: {
+        with: {
+          items: {
+            orderBy: (item, { asc }) => [asc(item.poLine)],
+            with: { grpoLines: { orderBy: (line, { asc }) => [asc(line.grpoDate)] } },
+          },
+        },
+      },
+    },
+  });
+  if (!request) throw new NotFoundError(`Asset request ${id}`);
+  return request;
+}
+
+// list แบบเบา (ไม่พ่วง relations) — โครงเดียวกับ findPage ของ purchase-order.service.ts
+// ประกอบ where เฉพาะเงื่อนไขที่ "มีค่า": isNull(deletedAt) เป็นฐาน + status/createBy ถ้าส่งมา
+export async function listMyDrafts({ page, limit, status, createBy }: ListQuery) {
+  const conditions = [isNull(assetRequest.deletedAt)];
+  if (status) conditions.push(eq(assetRequest.status, status));
+  if (createBy) conditions.push(eq(assetRequest.createdBy, createBy));
+  const where = and(...conditions);
+
+  // ยิงคู่ขนานเพราะสอง query ไม่พึ่งกัน — ประหยัดเวลาเท่า query ที่ช้ากว่า
+  const [rows, totalResult] = await Promise.all([
+    db.query.assetRequest.findMany({
+      where,
+      orderBy: desc(assetRequest.updatedAt),
+      limit,
+      offset: (page - 1) * limit,
+    }),
+    db.select({ value: count() }).from(assetRequest).where(where),
+  ]);
+
+  return paginate(rows, totalResult[0].value, page, limit);
+}
+
+// [การตัดสินใจชั่วคราวที่ต้องจดให้ตัวเอง — เรื่อง createBy]
+// ตอนนี้รับ createBy จาก body เพราะยังไม่มีระบบ login
+// TODO(auth): เมื่อมี JWT ต้อง "ห้าม" รับ identity จาก body เด็ดขาด — อ่านจาก token เท่านั้น
+// หลักคิด: ทุกอย่างที่ client ส่งมาคือสิ่งที่ปลอมได้ — ตัวตนต้องมาจากสิ่งที่ server ตรวจสอบเอง
+// (ตอนนั้นค่อยตัด createBy ออกจาก createDraftBody แล้ว signature ของ function นี้ไม่ต้องเปลี่ยน)
