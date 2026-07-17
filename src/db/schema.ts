@@ -10,6 +10,7 @@ import {
   integer,
   numeric,
   customType,
+  pgEnum,
 } from 'drizzle-orm/pg-core';
 import { relations, sql } from 'drizzle-orm';
 
@@ -24,6 +25,9 @@ const isoTimestamp = customType<{ data: string; driverData: string }>({
     return new Date(`${value.replace(' ', 'T')}Z`).toISOString();
   },
 });
+// ต้อง export — drizzle-kit อ่านเฉพาะ export ตอน push ไม่งั้นไม่สร้าง CREATE TYPE ให้
+export const enumEntity = pgEnum("entity_kind",["INVOICE","ASSET_IMG"])
+
 
 // ── Tables ตรงกับ ams_db จริง (introspect ผ่าน drizzle-kit pull) ──
 
@@ -106,3 +110,29 @@ export const grpoLineRelations = relations(grpoLine, ({ one }) => ({
     references: [purchaseOrderItem.id],
   }),
 }));
+
+export const attachment = pgTable(
+  "attachment",
+  {
+    id: uuid()
+      .default(sql`uuid_generate_v4()`)
+      .primaryKey()
+      .notNull(),
+    entityKind: enumEntity().notNull(),
+    entityType: varchar({ length: 50 }).notNull(),
+    entityId: uuid(),
+    originalName: varchar({ length: 255 }).notNull(),
+    storedName: varchar({ length: 100 }).notNull(),
+    mimeType: varchar({ length: 100 }).notNull(),
+    size: integer().notNull(),
+    createdAt: isoTimestamp()
+      .default(sql`now()`)
+      .notNull(),
+    deletedAt: isoTimestamp(),
+  },
+  (table) => [
+    // query หลักคือ "ไฟล์ของ record นี้มีอะไรบ้าง" — ไม่มี index = seq scan ทุกครั้ง
+    index('idx_attachment_entity').on(table.entityType, table.entityId),
+  ],
+);
+
