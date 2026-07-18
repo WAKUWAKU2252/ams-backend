@@ -11,6 +11,7 @@ import {
   numeric,
   customType,
   pgEnum,
+  unique,
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import { relations, sql } from 'drizzle-orm';
@@ -101,7 +102,9 @@ export const attachment = pgTable(
   (table) => [
     // ปลายทางของ composite FK ฝั่ง grpo/asset — บังคับให้ asset.imageId ชี้ได้เฉพาะแถว
     // ASSET_IMG และ grpo.invoiceId ชี้ได้เฉพาะ INVOICE (แนบผิดชนิด = insert ไม่ผ่านตั้งแต่ DB)
-    uniqueIndex('uq_attachment_id_doc_type').on(table.id, table.docType),
+    // ต้องเป็น unique() ไม่ใช่ uniqueIndex(): drizzle-kit introspect unique index ที่ขึ้นต้น
+    // ด้วย primary key ไม่ติด แล้วจะสั่งสร้างซ้ำทุกครั้งที่ push จน push พังถาวร
+    unique('uq_attachment_id_doc_type').on(table.id, table.docType),
   ],
 );
 

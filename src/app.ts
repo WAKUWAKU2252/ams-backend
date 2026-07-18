@@ -2,6 +2,7 @@ import { Elysia } from 'elysia';
 import { setup } from './plugins/setup';
 import { purchaseOrderRoutes } from './modules/purchase-order';
 import { assetRequestRoutes } from './modules/asset-request';
+import { uploadRoutes } from './modules/upload';
 
 // ประกอบ app ทั้งหมด — แยกจาก listen() เพื่อให้ test เรียก createApp().handle(...) ได้
 export const createApp = () =>
@@ -9,4 +10,5 @@ export const createApp = () =>
     .use(setup)
     .get('/health', () => ({ status: 'ok' }))
     .use(purchaseOrderRoutes)
-    .use(assetRequestRoutes);
+    .use(assetRequestRoutes)
+    .use(uploadRoutes);

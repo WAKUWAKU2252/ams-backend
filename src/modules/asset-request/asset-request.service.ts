@@ -37,11 +37,25 @@ export async function createDraft(poNumber: string, createBy: string) {
     throw new BadRequestError('PO นี้ยังไม่เคยมีการรับของ (GRPO) — ลงทะเบียนได้เฉพาะของที่ตรวจรับแล้ว');
   }
 
-  // [Q2 ต่อ — โควตา] ยังทำไม่ได้เพราะตาราง asset ยังไม่เกิด:
-  // TODO(asset): เมื่อมีตาราง asset แล้ว เพิ่มเช็คตอน POST /assets (ไม่ใช่ตอนสร้าง draft)
-  //   registered = COUNT(asset WHERE poItemId = ? AND deleted_at IS NULL)
-  //   ถ้า registered >= purchaseOrderItem.quantity -> BadRequestError('lineนี้ลงทะเบียนครบตามจำนวนสั่งแล้ว')
-  //   เพดานคือ "จำนวนสั่งใน PO" (quantity) ไม่ใช่จำนวนรับ — GRPO เป็นแค่ประตูเปิด/ปิดว่า line พร้อมลงหรือยัง
+  // [Q2 ต่อ — โควตา] เช็คตอน POST /assets ไม่ใช่ตอนสร้าง draft (draft ต้องหลวมไว้ก่อน)
+  //
+  // ★ สองตัวเลขคนละหน้าที่ อย่าสับสน:
+  //   purchase_order_item.quantity  = "จะมีทั้งหมดกี่ชิ้น" -> จำนวนแถวที่หน้าฟอร์มแสดง (คงที่ตั้งแต่วันแรก)
+  //   Σ grpo_line.receivedQty       = "ตอนนี้ของมาถึงแล้วกี่ชิ้น" -> เส้นแบ่งว่าแถวไหนเปิดให้กรอก
+  //
+  // สถานะรายแถว (ลำดับที่ n ของ line นั้น):
+  //   registered  มีแถวใน asset แล้ว
+  //   pending     ยังไม่มีแถว และ n <= Σ receivedQty   -> กรอกได้
+  //   noGrpo      ยังไม่มีแถว และ n >  Σ receivedQty   -> แสดงให้เห็นแต่ disabled (ของยังมาไม่ถึง)
+  //
+  // ตัวอย่าง: mouse สั่ง 10 รอบแรกรับ 6 -> แสดง 10 แถว กรอกได้แถว 1-6
+  // พอ GRPO รอบสองรับอีก 4 แถว 7-10 กลายเป็น pending เอง โดยจำนวนแถวไม่เปลี่ยน
+  //
+  // TODO(asset): เมื่อทำ POST /assets ให้เช็ค
+  //   registered = COUNT(asset WHERE grpo_line_id IN (line ของ item นี้) AND deleted_at IS NULL)
+  //   ถ้า registered >= purchaseOrderItem.quantity -> BadRequestError('line นี้ลงทะเบียนครบตามจำนวนสั่งแล้ว')
+  //   ส่วนการกันลงทะเบียนของที่ยังมาไม่ถึง ไม่ต้องเขียนเช็คเอง — asset.grpo_line_id เป็น NOT NULL
+  //   อยู่แล้ว ของที่ไม่มี grpo_line จึงสร้างแถวไม่ได้ตั้งแต่ระดับ DB
 
   // [Q3 — lock ระดับ PO] กติกาธุรกิจ: PO หนึ่งใบมี draft ค้างได้ใบเดียวทั้งระบบ
   // ใครกด Create ตอนมี draft ค้าง = รับใบเดิมไปทำต่อ (จงใจ "ไม่" กรอง createdBy)
