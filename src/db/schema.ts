@@ -27,7 +27,8 @@ const isoTimestamp = customType<{ data: string; driverData: string }>({
   },
 });
 // ต้อง export — drizzle-kit อ่านเฉพาะ export ตอน push ไม่งั้นไม่สร้าง CREATE TYPE ให้
-export const enumEntity = pgEnum("entity_kind",["INVOICE","ASSET_IMG"])
+// ชนิดของเอกสาร (คนละแกนกับ "เอกสารนี้เป็นของใคร" ซึ่งฝั่งเจ้าของถือ FK เอง)
+export const enumDocType = pgEnum('doc_type', ['INVOICE', 'ASSET_IMG']);
 
 
 // ── Tables ตรงกับ ams_db จริง (introspect ผ่าน drizzle-kit pull) ──
@@ -71,23 +72,99 @@ export const purchaseOrderItem = pgTable(
   ],
 );
 
+// ═══════════════════════════════════════════════════════════════════════════
+// attachment — ตาราง "ไฟล์" ล้วน ไม่รู้จักใครทั้งนั้น ฝั่งเจ้าของเป็นคนถือ FK ชี้เข้ามา
+// (grpo.invoiceId / asset.imageId) — เดิมเป็น polymorphic (entityType + entityId)
+// ซึ่ง pg บังคับ integrity ให้ไม่ได้เลย: ใส่ entityId ที่ไม่มีจริงก็ insert ผ่าน
+//
+// ทำไมไม่แยกเป็นตาราง invoice / asset_image: metadata เหมือนกันทุกคอลัมน์ แยกแล้ว
+// logic upload / soft delete / cleanup / ย้ายไป NAS ต้องทำซ้ำสองชุด และเอกสารชนิดที่ 3
+// (Movement) จะตามมาอีก — ใช้ docType แยกชนิดพอ ส่วนความปลอดภัยได้จาก composite FK ข้างล่าง
+// ═══════════════════════════════════════════════════════════════════════════
+export const attachment = pgTable(
+  'attachment',
+  {
+    id: uuid()
+      .default(sql`uuid_generate_v4()`)
+      .primaryKey()
+      .notNull(),
+    docType: enumDocType().notNull(),
+    originalName: varchar({ length: 255 }).notNull(),
+    storedName: varchar({ length: 100 }).notNull(),
+    mimeType: varchar({ length: 100 }).notNull(),
+    size: integer().notNull(),
+    createdAt: isoTimestamp()
+      .default(sql`now()`)
+      .notNull(),
+    deletedAt: isoTimestamp(),
+  },
+  (table) => [
+    // ปลายทางของ composite FK ฝั่ง grpo/asset — บังคับให้ asset.imageId ชี้ได้เฉพาะแถว
+    // ASSET_IMG และ grpo.invoiceId ชี้ได้เฉพาะ INVOICE (แนบผิดชนิด = insert ไม่ผ่านตั้งแต่ DB)
+    uniqueIndex('uq_attachment_id_doc_type').on(table.id, table.docType),
+  ],
+);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// grpo — หนึ่งแถว = การตรวจรับของหนึ่งรอบ (หนึ่งใบ GRPO ใน SAP)
+// เดิม grpoNo/grpoDate ถูกเขียนซ้ำทุกแถวใน grpo_line (8 แถวต่อใบ) จึงบังคับ unique
+// ไม่ได้เลย และไม่มี "ตัวตนของ GRPO หนึ่งใบ" ให้ invoice ผูก — ตารางนี้แก้ทั้งสองเรื่อง
+// ═══════════════════════════════════════════════════════════════════════════
+export const grpo = pgTable(
+  'grpo',
+  {
+    id: serial().primaryKey().notNull(),
+    grpoNo: varchar({ length: 50 }).notNull(),
+    grpoDate: date().notNull(),
+
+    // invoice ของรอบนี้ — ตั้งใจ "ไม่" unique: vendor ส่งของหลายรอบแล้วออกใบเรียกเก็บ
+    // รวมใบเดียวได้ หลาย grpo จึงชี้ attachment แถวเดียวกันได้ (ไฟล์บน disk มีใบเดียว)
+    invoiceId: uuid(),
+    // คู่กับ invoiceId ในการทำ composite FK — ค่าคงที่ ไม่ได้ให้ใครเขียน
+    invoiceDocType: enumDocType().generatedAlwaysAs(sql`'INVOICE'::doc_type`),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.invoiceId, table.invoiceDocType],
+      foreignColumns: [attachment.id, attachment.docType],
+      name: 'fk_grpo_invoice',
+    }),
+    // เลข GRPO จาก SAP ห้ามซ้ำทั้งระบบ — บังคับได้เพราะขึ้นมาอยู่ระดับ header แล้ว
+    uniqueIndex('uq_grpo_no').on(table.grpoNo),
+    // pg ไม่สร้าง index ให้ฝั่ง FK เอง — ใช้ตอบ "invoice ใบนี้ครอบ GRPO ไหนบ้าง"
+    index('idx_grpo_invoice_id').on(table.invoiceId),
+  ],
+);
+
+// grpo_line — รอบนี้รับ PO line ไหน จำนวนเท่าไร (ระดับ "รอบ × po line" ไม่ใช่ระดับชิ้น)
+// ความเป็นชิ้นเกิดที่ asset เท่านั้น — ตอนตรวจรับยังไม่มีใครรู้ว่าชิ้นไหนเป็นชิ้นไหน
 export const grpoLine = pgTable(
   'grpo_line',
   {
     id: uuid().default(sql`uuid_generate_v4()`).primaryKey().notNull(),
-    grpoNo: varchar({ length: 50 }).notNull(),
-    grpoDate: date().notNull(),
+    grpoId: integer().notNull(),
     poItemId: uuid().notNull(),
+    // จำนวนที่ "รับจริง" ในรอบนี้ — คนละตัวกับ purchase_order_item.quantity (จำนวนสั่ง)
+    // ของมาไม่ครบ/ทยอยมา สองค่านี้จะต่างกันเสมอ และค่านี้คือเพดานจำนวน asset
+    // ที่ลงทะเบียนจากรอบนี้ได้ (ไม่มีค่านี้ = validate จำนวนไม่ได้เลย)
     receivedQty: integer().notNull(),
   },
   (table) => [
+    foreignKey({
+      columns: [table.grpoId],
+      foreignColumns: [grpo.id],
+      name: 'fk_grpo_line_grpo',
+    }).onDelete('cascade'),
     foreignKey({
       columns: [table.poItemId],
       foreignColumns: [purchaseOrderItem.id],
       name: 'fk_grpo_line_po_item',
     }).onDelete('cascade'),
-    // pg ไม่สร้าง index ให้ฝั่ง FK เอง — ต้องมีเพื่อ join grpoLines ของ item และ cascade delete
+    // pg ไม่สร้าง index ให้ฝั่ง FK เอง — ต้องมีเพื่อ join และ cascade delete
+    index('idx_grpo_line_grpo_id').on(table.grpoId),
     index('idx_grpo_line_po_item_id').on(table.poItemId),
+    // รอบเดียวกันรับ line เดิมซ้ำสองแถวไม่ได้ — ถ้ารับเพิ่มต้องเป็น GRPO รอบใหม่
+    uniqueIndex('uq_grpo_line').on(table.grpoId, table.poItemId),
   ],
 );
 
@@ -106,37 +183,25 @@ export const purchaseOrderItemRelations = relations(purchaseOrderItem, ({ one, m
   grpoLines: many(grpoLine),
 }));
 
-export const grpoLineRelations = relations(grpoLine, ({ one }) => ({
+export const grpoLineRelations = relations(grpoLine, ({ one, many }) => ({
+  grpo: one(grpo, {
+    fields: [grpoLine.grpoId],
+    references: [grpo.id],
+  }),
   poItem: one(purchaseOrderItem, {
     fields: [grpoLine.poItemId],
     references: [purchaseOrderItem.id],
   }),
+  assets: many(asset),
 }));
 
-export const attachment = pgTable(
-  "attachment",
-  {
-    id: uuid()
-      .default(sql`uuid_generate_v4()`)
-      .primaryKey()
-      .notNull(),
-    entityKind: enumEntity().notNull(),
-    entityType: varchar({ length: 50 }).notNull(),
-    entityId: uuid(),
-    originalName: varchar({ length: 255 }).notNull(),
-    storedName: varchar({ length: 100 }).notNull(),
-    mimeType: varchar({ length: 100 }).notNull(),
-    size: integer().notNull(),
-    createdAt: isoTimestamp()
-      .default(sql`now()`)
-      .notNull(),
-    deletedAt: isoTimestamp(),
-  },
-  (table) => [
-    // query หลักคือ "ไฟล์ของ record นี้มีอะไรบ้าง" — ไม่มี index = seq scan ทุกครั้ง
-    index('idx_attachment_entity').on(table.entityType, table.entityId),
-  ],
-);
+export const grpoRelations = relations(grpo, ({ one, many }) => ({
+  lines: many(grpoLine),
+  invoice: one(attachment, {
+    fields: [grpo.invoiceId],
+    references: [attachment.id],
+  }),
+}));
 
 
 export const enumRequestStatus = pgEnum('request_status',
@@ -186,10 +251,137 @@ export const assetRequest = pgTable(
 
 // ── Relations ของ asset_request — ประกาศสองฝั่งให้ query ได้ทั้งขึ้นและลง ──
 
-export const assetRequestRelations = relations(assetRequest, ({ one }) => ({
+export const assetRequestRelations = relations(assetRequest, ({ one, many }) => ({
   purchaseOrder: one(purchaseOrder, {
     fields: [assetRequest.poNumber],
     references: [purchaseOrder.poNumber],
+  }),
+  assets: many(asset),
+}));
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ตาราง asset — ตรงกับ Masterdata.xlsx sheet "Asset"
+// แถว asset เกิดตั้งแต่กด "ลงทะเบียน" ในคำขอ (lifecycle=DRAFT) — ระบบอื่น
+// (Dashboard/Audit/Report) ต้อง query เฉพาะ lifecycle='REGISTERED' เสมอ
+//
+// [FK ที่ยัง "ผูกจริงไม่ได้" เพราะตารางปลายทางยังไม่เกิด] — เก็บเป็นคอลัมน์ไว้ก่อน
+// ตาม Masterdata แต่ยังไม่ใส่ foreignKey() จนกว่าตารางเหล่านี้จะถูกสร้าง:
+//   categoryId -> Category / uomId -> Uom / employeeId -> Employee
+//   locationId -> Asset location / subLocationId -> Asset sub location
+//   createdBy/updatedBy/deletedBy -> User
+// TODO: เมื่อสร้างตาราง master เหล่านี้แล้ว เพิ่ม foreignKey() + index ให้ครบ
+//
+// [ผลที่ตามมาต่อ flow ลงทะเบียน] categoryId/uomId/locationId เป็น NOT NULL ตาม Masterdata
+// → การ insert asset จริง (เฟสฟอร์ม) ยังทำไม่ได้จนกว่าจะมีตาราง master + ตัวเลือกใน UI
+//
+// createdBy/updatedBy/deletedBy: Masterdata = INTEGER FK->User แต่ใช้ varchar ชั่วคราว
+// ให้สอดคล้องกับ asset_request (ยังไม่มี auth) — TODO(auth): เปลี่ยนเป็น FK -> users
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const enumAssetLifecycle = pgEnum('asset_lifecycle', ['DRAFT', 'REGISTERED']);
+
+export const enumAssetStatus = pgEnum('asset_status', [
+  'Active',
+  'Inactive',
+  'Under Maintenance',
+  'Lost',
+  'Disposed',
+]);
+
+export const asset = pgTable(
+  'asset',
+  {
+    id: serial().primaryKey().notNull(),
+
+    // ชี้กลับใบคำขอที่ทำให้ชิ้นนี้เกิด
+    requestId: integer().notNull(),
+    // ลำดับเครื่องภายในคำขอ — คู่กับ requestId เป็นกุญแจกันแถวซ้ำ (ดู uq_asset_unit)
+    unitNo: integer().notNull(),
+    // ชิ้นนี้มาจากรอบรับของ (GRPO) ไหน — grpo_line มีทั้ง grpoNo และ poItemId ในตัว
+    // จึงไต่กลับหา PO line ได้ (asset -> grpo_line.poItemId) โดยไม่ต้องเก็บ poItemId ซ้ำ
+    grpoLineId: uuid().notNull(),
+
+    // เลขทะเบียนจริงจาก SAP — NULL ระหว่าง DRAFT (SAP ออกเลขหลังอนุมัติ)
+    // service บังคับต้องมีค่าเมื่อ lifecycle='REGISTERED'; UNIQUE ของ pg ยอมหลาย NULL
+    assetNumber: varchar({ length: 100 }),
+    description: varchar({ length: 100 }),
+    serialNumber: varchar({ length: 100 }),
+
+    categoryId: integer().notNull(), // FK -> Category (ยังไม่มีตาราง)
+    assetClass: varchar({ length: 50 }),
+    qrCode: varchar({ length: 255 }),
+
+    // วงจรชีวิตเอกสาร (คนละแกนกับ status) — DRAFT->REGISTERED เดินทางเดียว ไม่ย้อนกลับ
+    lifecycle: enumAssetLifecycle().default('DRAFT').notNull(),
+    // สภาพการใช้งานจริง — มีความหมายเมื่อ REGISTERED แล้ว (ระหว่าง DRAFT ตั้ง Active รอไว้)
+    status: enumAssetStatus().default('Active'),
+
+    uomId: integer().notNull(), // FK -> Uom (ยังไม่มีตาราง)
+    employeeId: integer(), // FK -> Employee (ยังไม่มีตาราง)
+    locationId: integer().notNull(), // FK -> Asset location (ยังไม่มีตาราง)
+    subLocationId: integer(), // FK -> Asset sub location (ยังไม่มีตาราง)
+
+    warrantyStartDate: isoTimestamp(),
+    warrantyEndDate: isoTimestamp(),
+
+    // รูปของชิ้นนี้ — คอลัมน์เดียว = 1 ชิ้นไม่เกิน 1 รูป, unique (ดูข้างล่าง) = ห้ามสองชิ้น
+    // ใช้ไฟล์เดียวกัน เพราะรูปมีไว้ยืนยันตัวตน/สภาพ "รายชิ้น" ให้ Audit ใช้เทียบตอนสแกน QR
+    // ถ้าใช้รูปร่วมกันได้ รูปจะพิสูจน์อะไรไม่ได้เลย — NULL ระหว่าง DRAFT (pg ยอมหลาย NULL)
+    imageId: uuid(),
+    // คู่กับ imageId ในการทำ composite FK — ค่าคงที่ ไม่ได้ให้ใครเขียน
+    imageDocType: enumDocType().generatedAlwaysAs(sql`'ASSET_IMG'::doc_type`),
+
+    createdAt: isoTimestamp().default(sql`now()`).notNull(),
+    createdBy: varchar({ length: 100 }).notNull(), // temp varchar — TODO(auth) FK -> users
+    updatedAt: isoTimestamp().default(sql`now()`).notNull(),
+    updatedBy: varchar({ length: 100 }).notNull(), // temp varchar — TODO(auth) FK -> users
+
+    deletedAt: isoTimestamp(),
+    deletedBy: varchar({ length: 100 }), // temp varchar — TODO(auth) FK -> users
+  },
+  (table) => [
+    // ไม่ cascade: asset เป็นข้อมูลธุรกิจ (soft delete) — ห้ามหายเงียบตามคำขอ/รอบรับของที่ถูกลบ
+    foreignKey({
+      columns: [table.requestId],
+      foreignColumns: [assetRequest.id],
+      name: 'fk_asset_request',
+    }),
+    foreignKey({
+      columns: [table.grpoLineId],
+      foreignColumns: [grpoLine.id],
+      name: 'fk_asset_grpo_line',
+    }),
+    // composite FK — imageId ชี้ไปแถว INVOICE ไม่ได้ DB ปฏิเสธเอง
+    foreignKey({
+      columns: [table.imageId, table.imageDocType],
+      foreignColumns: [attachment.id, attachment.docType],
+      name: 'fk_asset_image',
+    }),
+    // pg ไม่สร้าง index ให้ฝั่ง FK เอง — ใช้ตอน join/นับ asset ของคำขอ และของรอบรับของ
+    index('idx_asset_request_id').on(table.requestId),
+    index('idx_asset_grpo_line_id').on(table.grpoLineId),
+    // กันดับเบิลคลิกแล้วได้แถวซ้ำ: 1 คำขอมี unit_no ซ้ำไม่ได้ (นับเฉพาะที่ยังไม่ถูกลบ)
+    uniqueIndex('uq_asset_unit').on(table.requestId, table.unitNo).where(sql`${table.deletedAt} IS NULL`),
+    // เลข SAP ต้องไม่ซ้ำ — pg ยอมหลาย NULL อยู่แล้ว (ช่วง DRAFT ยังไม่มีเลข)
+    uniqueIndex('uq_asset_number').on(table.assetNumber),
+    // 1 ไฟล์รูป = 1 ชิ้น ห้ามใช้ร่วม — เปลี่ยนรูปต้องอัปไฟล์ใหม่แล้วสลับ imageId
+    // (ห้ามเขียนทับไฟล์เดิมบน disk: browser cache ค้าง + ทำลายหลักฐานรูปตอนรับของ)
+    uniqueIndex('uq_asset_image').on(table.imageId),
+  ],
+);
+
+export const assetRelations = relations(asset, ({ one }) => ({
+  request: one(assetRequest, {
+    fields: [asset.requestId],
+    references: [assetRequest.id],
+  }),
+  grpoLine: one(grpoLine, {
+    fields: [asset.grpoLineId],
+    references: [grpoLine.id],
+  }),
+  image: one(attachment, {
+    fields: [asset.imageId],
+    references: [attachment.id],
   }),
 }));
 
