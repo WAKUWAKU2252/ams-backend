@@ -8,7 +8,7 @@
 //   - BadRequestError จาก '../../common/errors' (เพิ่มเข้าบรรทัดเดียวกับ NotFoundError)
 import { join } from 'node:path';
 import { mkdir } from 'node:fs/promises';
-import { eq, isNull, and, sql, entityKind } from 'drizzle-orm';
+import { eq, isNull, and, sql } from 'drizzle-orm';
 import { db } from '../../db';
 import { attachment } from '../../db/schema';
 import { env } from '../../config/env';
@@ -50,8 +50,8 @@ await mkdir(env.UPLOAD_DIR,{recursive:true});
 //   4.2 loop เซฟทีละไฟล์:
 //       - storedName = crypto.randomUUID() + '.' + ext  (ตั้งชื่อเองเสมอ ห้ามใช้ file.name ใน path)
 //       - await Bun.write(join(env.UPLOAD_DIR, storedName), file)
-//       - db.insert(attachment).values({...}).returning() — entityType ใส่ 'asset' ไปก่อน,
-//         entityId ไม่ต้องใส่ (NULL = ยังไม่ผูกกับ asset — asset service มาผูกทีหลัง)
+//       - db.insert(attachment).values({...}).returning() — ใส่แค่ docType + metadata ของไฟล์
+//         attachment ไม่รู้จักเจ้าของ ฝั่ง grpo.invoiceId / asset.imageId มาชี้เข้ามาเองทีหลัง
 //   4.3 return { files: [{ id, name, url, size }] } — shape ตรงกับ attachmentApi.ts ฝั่ง frontend
 //       url = `/uploads/${id}/file` ให้ frontend เอาไปใส่ <img :src> ได้เลย
 
@@ -80,8 +80,9 @@ export async function saveFiles(files: File[],entityKind: EntityKind){
         const [row] = await db
         .insert(attachment)
         .values({
-            entityKind,
-            entityType:'asset',
+            // ไฟล์ถูกบันทึกแบบยังไม่มีเจ้าของ — ฝั่งเจ้าของ (grpo.invoiceId / asset.imageId)
+            // มาชี้เข้ามาทีหลังตอน submit ฟอร์ม โดยใช้ id ที่ return กลับไปให้ frontend
+            docType: entityKind,
             originalName:file.name,
             storedName,
             mimeType:file.type,

@@ -14,7 +14,9 @@ export function findAll() {
     with: {
       items: { 
         orderBy: (item, { asc }) => [asc(item.poLine)],
-        with: { grpoLines: { orderBy: (line, { asc }) => [asc(line.grpoDate)] } },
+        // grpoNo/grpoDate ย้ายขึ้นไปอยู่ตาราง grpo แล้ว ต้องพ่วงมาด้วยเพราะหน้าฟอร์มแสดง
+        // เลข GRPO ต่อชิ้น — เรียงตาม grpoId (serial) = เรียงตามลำดับรอบรับของอยู่แล้ว
+        with: { grpoLines: { with: { grpo: true }, orderBy: (line, { asc }) => [asc(line.grpoId)] } },
       },
     },
     orderBy: (po, { desc }) => [desc(po.poDate)],
@@ -27,7 +29,9 @@ export async function findOneOrFail(poNumber: string) {
     with: {
       items: {
         orderBy: (item, { asc }) => [asc(item.poLine)],
-        with: { grpoLines: { orderBy: (line, { asc }) => [asc(line.grpoDate)] } },
+        // grpoNo/grpoDate ย้ายขึ้นไปอยู่ตาราง grpo แล้ว ต้องพ่วงมาด้วยเพราะหน้าฟอร์มแสดง
+        // เลข GRPO ต่อชิ้น — เรียงตาม grpoId (serial) = เรียงตามลำดับรอบรับของอยู่แล้ว
+        with: { grpoLines: { with: { grpo: true }, orderBy: (line, { asc }) => [asc(line.grpoId)] } },
       },
     },
   });

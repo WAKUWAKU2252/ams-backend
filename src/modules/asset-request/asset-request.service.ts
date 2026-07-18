@@ -38,9 +38,10 @@ export async function createDraft(poNumber: string, createBy: string) {
   }
 
   // [Q2 ต่อ — โควตา] ยังทำไม่ได้เพราะตาราง asset ยังไม่เกิด:
-  // TODO(asset): เมื่อมีตาราง asset แล้ว เพิ่มเช็ค
-  //   registered = COUNT(asset WHERE grpo_line_id IN (...) AND deleted_at IS NULL)
-  //   ถ้า registered >= Σ receivedQty -> BadRequestError('รายการนี้ลงทะเบียนครบตามจำนวนรับแล้ว')
+  // TODO(asset): เมื่อมีตาราง asset แล้ว เพิ่มเช็คตอน POST /assets (ไม่ใช่ตอนสร้าง draft)
+  //   registered = COUNT(asset WHERE poItemId = ? AND deleted_at IS NULL)
+  //   ถ้า registered >= purchaseOrderItem.quantity -> BadRequestError('lineนี้ลงทะเบียนครบตามจำนวนสั่งแล้ว')
+  //   เพดานคือ "จำนวนสั่งใน PO" (quantity) ไม่ใช่จำนวนรับ — GRPO เป็นแค่ประตูเปิด/ปิดว่า line พร้อมลงหรือยัง
 
   // [Q3 — lock ระดับ PO] กติกาธุรกิจ: PO หนึ่งใบมี draft ค้างได้ใบเดียวทั้งระบบ
   // ใครกด Create ตอนมี draft ค้าง = รับใบเดิมไปทำต่อ (จงใจ "ไม่" กรอง createdBy)
@@ -91,7 +92,8 @@ export async function getDraftOrFail(id: number) {
         with: {
           items: {
             orderBy: (item, { asc }) => [asc(item.poLine)],
-            with: { grpoLines: { orderBy: (line, { asc }) => [asc(line.grpoDate)] } },
+            // พ่วง grpo มาด้วย — เลข GRPO ต่อชิ้นที่หน้าฟอร์มแสดงอยู่ในตารางนั้นแล้ว
+            with: { grpoLines: { with: { grpo: true }, orderBy: (line, { asc }) => [asc(line.grpoId)] } },
           },
         },
       },
