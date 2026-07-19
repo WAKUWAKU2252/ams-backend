@@ -4,6 +4,7 @@ import { purchaseOrderRoutes } from './modules/purchase-order';
 import { assetRequestRoutes } from './modules/asset-request';
 import { uploadRoutes } from './modules/upload';
 import { grpoRoutes } from './modules/grpo';
+import { assetRoutes } from './modules/asset';
 
 // ประกอบ app ทั้งหมด — แยกจาก listen() เพื่อให้ test เรียก createApp().handle(...) ได้
 export const createApp = () =>
@@ -13,4 +14,5 @@ export const createApp = () =>
     .use(purchaseOrderRoutes)
     .use(assetRequestRoutes)
     .use(uploadRoutes)
-    .use(grpoRoutes);
+    .use(grpoRoutes)
+    .use(assetRoutes);
