@@ -13,7 +13,6 @@ import { and, count, desc, eq, isNull } from 'drizzle-orm';
 import { db } from '../../db';
 import { assetRequest, purchaseOrder } from '../../db/schema';
 import { NotFoundError, BadRequestError } from '../../common/errors';
-import { ASSET_MIN_UNIT_PRICE, isRegistrable } from '../../common/asset-policy';
 import { paginate } from '../../common/pagination';
 import { listQuery } from './asset-request.schema';
 
@@ -38,43 +37,15 @@ export async function createDraft(poNumber: string, createBy: string) {
     throw new BadRequestError('PO นี้ยังไม่เคยมีการรับของ (GRPO) — ลงทะเบียนได้เฉพาะของที่ตรวจรับแล้ว');
   }
 
-  // [Q2.5] มีสัก line ที่ "ต้องขึ้นทะเบียน" จริงไหม — เช็คแยกจาก Q2 เพื่อให้ข้อความบอกสาเหตุตรงจุด
-  // ไม่เช็คตรงนี้ = PO ที่มีแต่ของราคาต่อชิ้นไม่ถึงเกณฑ์ (เช่น PO เครื่องเขียนล้วน) เปิด draft ได้
-  // แล้วผู้ใช้เจอฟอร์มที่ทุกช่องเป็น lowValue กรอกอะไรไม่ได้เลย กลายเป็นใบเปล่าค้างระบบ
-  // แถมไปกิน uq_asset_request_draft ของ PO ใบนั้นจนคนอื่นสร้างใบใหม่ไม่ได้ด้วย
-  const registrable = po.items.filter((i) => isRegistrable(i.unitPrice));
-  if (registrable.length === 0) {
-    throw new BadRequestError(
-      `PO นี้ไม่มีรายการที่เข้าเกณฑ์สินทรัพย์ (ราคาต่อชิ้นมากกว่า ${ASSET_MIN_UNIT_PRICE.toLocaleString()} บาท) — ทั้งใบลงเป็นค่าใช้จ่าย`,
-    );
-  }
-
-  // ของที่ต้องขึ้นทะเบียนต้องมาถึงแล้วอย่างน้อยหนึ่งรายการ ไม่ใช่แค่ของถูกที่มาถึง
-  if (registrable.every((i) => i.grpoLines.length === 0)) {
-    throw new BadRequestError(
-      'รายการที่เข้าเกณฑ์สินทรัพย์ใน PO นี้ยังไม่ได้รับของ — รอ GRPO ของรายการนั้นก่อน',
-    );
-  }
-
-  // [Q2 ต่อ — โควตา] เช็คตอน POST /assets ไม่ใช่ตอนสร้าง draft (draft ต้องหลวมไว้ก่อน)
+  // โควตาต่อรายการเช็คตอน POST /assets ไม่ใช่ตอนสร้าง draft (draft ต้องหลวมไว้ก่อน)
   //
   // ★ สองตัวเลขคนละหน้าที่ อย่าสับสน:
   //   purchase_order_item.quantity  = "จะมีทั้งหมดกี่ชิ้น" -> จำนวนแถวที่หน้าฟอร์มแสดง (คงที่ตั้งแต่วันแรก)
   //   Σ grpo_line.receivedQty       = "ตอนนี้ของมาถึงแล้วกี่ชิ้น" -> เส้นแบ่งว่าแถวไหนเปิดให้กรอก
   //
-  // สถานะรายแถว (ลำดับที่ n ของ line นั้น):
-  //   registered  มีแถวใน asset แล้ว
-  //   pending     ยังไม่มีแถว และ n <= Σ receivedQty   -> กรอกได้
-  //   noGrpo      ยังไม่มีแถว และ n >  Σ receivedQty   -> แสดงให้เห็นแต่ disabled (ของยังมาไม่ถึง)
-  //
-  // ตัวอย่าง: mouse สั่ง 10 รอบแรกรับ 6 -> แสดง 10 แถว กรอกได้แถว 1-6
-  // พอ GRPO รอบสองรับอีก 4 แถว 7-10 กลายเป็น pending เอง โดยจำนวนแถวไม่เปลี่ยน
-  //
-  // TODO(asset): เมื่อทำ POST /assets ให้เช็ค
-  //   registered = COUNT(asset WHERE grpo_line_id IN (line ของ item นี้) AND deleted_at IS NULL)
-  //   ถ้า registered >= purchaseOrderItem.quantity -> BadRequestError('line นี้ลงทะเบียนครบตามจำนวนสั่งแล้ว')
-  //   ส่วนการกันลงทะเบียนของที่ยังมาไม่ถึง ไม่ต้องเขียนเช็คเอง — asset.grpo_line_id เป็น NOT NULL
-  //   อยู่แล้ว ของที่ไม่มี grpo_line จึงสร้างแถวไม่ได้ตั้งแต่ระดับ DB
+  // ระบบไม่คัดกรองเองว่ารายการไหนควรขึ้นทะเบียน — Warehouse ลงได้ทุกรายการที่รับของแล้ว
+  // แล้วบัญชีเป็นผู้ตรวจตอนอนุมัติ (เกณฑ์อัตโนมัติตัดสินผิดได้ เช่น ค่าเช่า cloud ราคาสูง
+  // แต่เป็นค่าใช้จ่าย ส่วนของถูกบางอย่างกลับต้องติดตาม)
 
   // [Q3 — lock ระดับ PO] กติกาธุรกิจ: PO หนึ่งใบมี draft ค้างได้ใบเดียวทั้งระบบ
   // ใครกด Create ตอนมี draft ค้าง = รับใบเดิมไปทำต่อ (จงใจ "ไม่" กรอง createdBy)

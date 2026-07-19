@@ -4,10 +4,9 @@
 // [วิธีคิดของ create — ลำดับการตรวจคือการเล่าเหตุผลทางธุรกิจ]
 //   Q1 ใบคำขอมีจริงและยังแก้ได้ไหม      (DRAFT เท่านั้น)          → 404 / 400
 //   Q2 รอบรับของที่อ้างเป็นของ PO ใบนี้จริงไหม                    → 400  ★ กันยัดของข้าม PO
-//   Q3 ราคาถึงเกณฑ์สินทรัพย์ไหม          (> 5,000 ต่อหน่วย)        → 400
-//   Q4 ยังลงได้อีกไหม                   (ไม่เกินที่รับจริง/ที่สั่ง)  → 400
-//   Q5 ข้อมูลอ้างอิงที่เลือกใช้ได้จริงไหม (master ยัง active)      → 400
-//   Q6 รูปที่แนบเป็นรูปจริงและยังว่างไหม                          → 400 / 409
+//   Q3 ยังลงได้อีกไหม                   (ไม่เกินที่รับจริง/ที่สั่ง)  → 400
+//   Q4 ข้อมูลอ้างอิงที่เลือกใช้ได้จริงไหม (master ยัง active)      → 400
+//   Q5 รูปที่แนบเป็นรูปจริงและยังว่างไหม                          → 400 / 409
 // ทุก error ต้องบอกสิ่งที่ผู้ใช้ "แก้ได้" ไม่ใช่แค่ว่า invalid
 
 import { and, count, eq, inArray, isNull, max } from 'drizzle-orm';
@@ -24,14 +23,14 @@ import {
   employee,
 } from '../../db/schema';
 import { NotFoundError, BadRequestError, ConflictError } from '../../common/errors';
-import { ASSET_MIN_UNIT_PRICE, isRegistrable } from '../../common/asset-policy';
 import { createAssetBody, updateAssetBody } from './asset.schema';
 
 type CreateBody = typeof createAssetBody.static;
 type UpdateBody = typeof updateAssetBody.static;
 
-// เกณฑ์ราคาอยู่ที่ common/asset-policy — เช็คที่ service ด้วยไม่ใช่แค่ front
-// เพราะหน้าเว็บ disable ปุ่มได้ก็จริง แต่ยิง API ตรงยังผ่าน
+// ระบบไม่ตัดสินเองว่าอะไรเข้าข่ายสินทรัพย์ — Warehouse ลงทะเบียนได้ทุกรายการที่รับของแล้ว
+// แล้วบัญชีเป็นผู้ตรวจตอนอนุมัติว่ารายการไหนควรขึ้นทะเบียนจริง รายการไหนลงเป็นค่าใช้จ่าย
+// (เกณฑ์ราคาตายตัวตัดสินผิดได้ เช่น ค่าเช่า cloud/license ที่ราคาสูงแต่เป็นค่าใช้จ่าย)
 
 // ── ตัวช่วยที่ใช้ร่วมกันระหว่าง create กับ update ─────────────────────────────
 
@@ -133,15 +132,7 @@ export async function create(body: CreateBody) {
     );
   }
 
-  // [Q3] ของชิ้นนี้เข้าเกณฑ์สินทรัพย์ไหม — ต่ำกว่าเกณฑ์ลงบัญชีเป็นค่าใช้จ่าย ไม่ขึ้นทะเบียน
-  if (!isRegistrable(line.poItem.unitPrice)) {
-    throw new BadRequestError(
-      `"${line.poItem.itemDescription}" ราคาต่อหน่วย ${line.poItem.unitPrice.toLocaleString()} บาท ` +
-        `ไม่ถึงเกณฑ์สินทรัพย์ (มากกว่า ${ASSET_MIN_UNIT_PRICE.toLocaleString()} บาท) — ลงเป็นค่าใช้จ่ายแทน`,
-    );
-  }
-
-  // [Q4] ยังลงได้อีกไหม — สองเพดานคนละความหมาย ต้องเช็คทั้งคู่
+  // [Q3] ยังลงได้อีกไหม — สองเพดานคนละความหมาย ต้องเช็คทั้งคู่
   //   ต่อรอบรับของ: ห้ามเกินที่ "รับมาจริง" ในรอบนั้น (ของยังมาไม่ถึงลงทะเบียนไม่ได้)
   const [{ value: inThisLine }] = await db
     .select({ value: count() })
@@ -177,7 +168,7 @@ export async function create(body: CreateBody) {
     );
   }
 
-  // [Q5] [Q6] ข้อมูลอ้างอิงและรูป
+  // [Q4] [Q5] ข้อมูลอ้างอิงและรูป
   await assertMasterUsable(body);
   if (body.imageId) await assertImageUsable(body.imageId);
 
@@ -237,12 +228,10 @@ export async function findOneOrFail(id: number) {
  *   po_item.quantity   = จะมีทั้งหมดกี่ชิ้น -> จำนวนช่องที่แสดง (คงที่ตั้งแต่เปิดใบ)
  *   Σ receivedQty      = ตอนนี้ของมาถึงแล้วกี่ชิ้น -> เส้นแบ่งว่าช่องไหนเปิดให้กรอก
  *
- * สถานะต่อช่อง (เรียงตามลำดับที่ตรวจ):
+ * สถานะต่อช่อง:
  *   registered  มีแถวใน asset แล้ว
- *   lowValue    ราคาต่อหน่วยไม่ถึงเกณฑ์ — แสดงให้เห็นว่ามีของ แต่กรอกไม่ได้ทั้ง line
  *   pending     ของมาถึงแล้วและยังไม่ได้ลง -> กรอกได้
  *   noGrpo      ของยังมาไม่ถึง
- * lowValue มาก่อน pending/noGrpo เพราะไม่ว่าของจะมาหรือไม่ ก็ลงทะเบียนไม่ได้อยู่ดี
  */
 export async function findSlotsByRequest(requestId: number) {
   const request = await db.query.assetRequest.findFirst({
@@ -273,7 +262,6 @@ export async function findSlotsByRequest(requestId: number) {
     items: request.purchaseOrder.items.map((item) => {
       const received = item.grpoLines.reduce((sum, l) => sum + l.receivedQty, 0);
       const mine = registered.filter((a) => item.grpoLines.some((l) => l.id === a.grpoLineId));
-      const isLowValue = !isRegistrable(item.unitPrice);
 
       const slots = Array.from({ length: item.quantity }, (_, i) => {
         const existing = mine[i];
@@ -287,8 +275,6 @@ export async function findSlotsByRequest(requestId: number) {
             grpoNo: existing.grpoLine.grpo.grpoNo,
           };
         }
-        // ราคาไม่ถึงเกณฑ์ = ลงไม่ได้ทั้ง line ไม่ว่าของจะมาถึงหรือยัง
-        if (isLowValue) return { index: i + 1, status: 'lowValue' as const };
         // ของที่รับมาแล้วแต่ยังไม่ได้ลงทะเบียน = ช่องที่เปิดให้กรอก
         return i < received
           ? { index: i + 1, status: 'pending' as const }
@@ -300,8 +286,6 @@ export async function findSlotsByRequest(requestId: number) {
         poLine: item.poLine,
         itemDescription: item.itemDescription,
         unitPrice: item.unitPrice,
-        // บอก frontend ตรง ๆ ว่าทั้ง line นี้ลงไม่ได้ จะได้ไม่ต้องเดาจากราคาเอง
-        isLowValue,
         ordered: item.quantity,
         received,
         registered: mine.length,

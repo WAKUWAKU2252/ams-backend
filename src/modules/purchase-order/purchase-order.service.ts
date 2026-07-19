@@ -2,7 +2,6 @@ import { and, count, eq, ilike, inArray, isNull, or, sql } from 'drizzle-orm';
 import { db } from '../../db';
 import { purchaseOrder, purchaseOrderItem, grpoLine, asset } from '../../db/schema';
 import { NotFoundError } from '../../common/errors';
-import { isRegistrable } from '../../common/asset-policy';
 import { paginate } from '../../common/pagination';
 
 // with นี้ inline ในแต่ละ query (ไม่แยกเป็น const) เพราะ Drizzle infer type ของ callback
@@ -26,26 +25,19 @@ function toReceivedStatus(lines: { ordered: number; received: number }[]): Recei
 }
 
 /**
- * "งานลงทะเบียนสินทรัพย์ของ PO ใบนี้จบหรือยัง" — คนละคำถามกับ receivedStatus
- *   Warehouse ถาม "ของมาครบไหม"        -> receivedStatus (นับทุกบรรทัด ของถูกก็ต้องรับเข้าคลัง)
- *   คนทำทะเบียนถาม "ลงทะเบียนจบไหม"    -> registrationStatus (นับเฉพาะบรรทัดที่เข้าเกณฑ์ราคา)
+ * "ลงทะเบียนสินทรัพย์ไปแล้วแค่ไหน" — คนละคำถามกับ receivedStatus
+ *   Warehouse ถาม "ของมาครบไหม"     -> receivedStatus
+ *   คนทำทะเบียนถาม "ลงไปแล้วแค่ไหน"  -> registrationStatus
  *
- *   notApplicable  ทั้งใบไม่มีบรรทัดไหนถึงเกณฑ์ราคา — ไม่มีอะไรต้องลงทะเบียน (เช่น PO เครื่องเขียน)
- *   none           มีของที่ต้องลง แต่ยังไม่ได้ลงสักชิ้น
- *   partial        ลงไปบ้างแล้ว
- *   full           ทุกบรรทัดที่เข้าเกณฑ์ลงครบตามจำนวนที่สั่ง
- *
- * นับเฉพาะบรรทัดที่เข้าเกณฑ์เท่านั้น ไม่งั้น PO ที่มีเมาส์ปนอยู่จะไม่มีวันขึ้น full
+ * นับทุกบรรทัด — ระบบไม่ตัดสินเองว่าอะไรควรขึ้นทะเบียน บัญชีเป็นผู้ตรวจตอนอนุมัติ
+ * (ค่าเช่า cloud/license ราคาสูงแต่เป็นค่าใช้จ่าย — เกณฑ์อัตโนมัติตัดสินผิดได้)
  */
-export type RegistrationStatus = 'notApplicable' | 'none' | 'partial' | 'full';
+export type RegistrationStatus = 'none' | 'partial' | 'full';
 
-function toRegistrationStatus(
-  lines: { ordered: number; unitPrice: number; registered: number }[],
-): RegistrationStatus {
-  const target = lines.filter((l) => isRegistrable(l.unitPrice));
-  if (target.length === 0) return 'notApplicable';
-  if (target.every((l) => l.registered === 0)) return 'none';
-  return target.every((l) => l.registered >= l.ordered) ? 'full' : 'partial';
+function toRegistrationStatus(lines: { ordered: number; registered: number }[]): RegistrationStatus {
+  if (lines.length === 0) return 'none';
+  if (lines.every((l) => l.registered === 0)) return 'none';
+  return lines.every((l) => l.registered >= l.ordered) ? 'full' : 'partial';
 }
 
 interface LineTotals {
@@ -132,8 +124,6 @@ function withLineTotals<
     received,
     registered: registered.get(item.id) ?? 0,
     isFullyReceived: received >= item.quantity,
-    // บอกตรง ๆ ว่าบรรทัดนี้ต้องขึ้นทะเบียนไหม frontend จะได้ไม่ต้องรู้เกณฑ์ราคาเอง
-    isRegistrable: isRegistrable(item.unitPrice),
   };
 }
 
