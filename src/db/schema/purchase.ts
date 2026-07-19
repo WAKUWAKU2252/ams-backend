@@ -3,11 +3,14 @@ import { pgTable, varchar, date, uuid, integer, numeric, foreignKey, index } fro
 import { sql } from 'drizzle-orm';
 import { isoTimestamp } from './_shared';
 
+// ไม่มีคอลัมน์ status โดยตั้งใจ — "รับครบหรือยัง" เป็นเลขคณิต (Σ receivedQty เทียบ quantity)
+// ที่คำนวณสดได้เสมอ SAP ก็ไม่ได้ส่งค่านี้มาให้ การเก็บซ้ำจึงมีแต่ภาระต้องคอยอัปเดตทุกครั้ง
+// ที่ grpo_line เปลี่ยน (เพิ่ม/แก้/ลบ/sync จาก SAP) ลืมจุดเดียวคอลัมน์ก็โกหกทันที
+// โดยที่คนอ่านไม่มีทางรู้ — ดู receivedStatus ใน purchase-order.service แทน
 export const purchaseOrder = pgTable('purchase_order', {
   poNumber: varchar({ length: 50 }).primaryKey().notNull(),
   vendorName: varchar({ length: 100 }),
   poDate: date(),
-  status: varchar({ length: 20 }).default('PENDING').notNull(),
   createdAt: isoTimestamp().default(sql`now()`).notNull(),
   updatedAt: isoTimestamp().default(sql`now()`).notNull(),
 });
