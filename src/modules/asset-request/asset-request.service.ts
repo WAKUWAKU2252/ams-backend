@@ -13,6 +13,7 @@ import { and, count, desc, eq, isNull } from 'drizzle-orm';
 import { db } from '../../db';
 import { assetRequest, purchaseOrder } from '../../db/schema';
 import { NotFoundError, BadRequestError } from '../../common/errors';
+import { ASSET_MIN_UNIT_PRICE, isRegistrable } from '../../common/asset-policy';
 import { paginate } from '../../common/pagination';
 import { listQuery } from './asset-request.schema';
 
@@ -35,6 +36,24 @@ export async function createDraft(poNumber: string, createBy: string) {
   // [Q2] มีสัก line ที่ตรวจรับแล้วไหม
   if (po.items.every((i) => i.grpoLines.length === 0)) {
     throw new BadRequestError('PO นี้ยังไม่เคยมีการรับของ (GRPO) — ลงทะเบียนได้เฉพาะของที่ตรวจรับแล้ว');
+  }
+
+  // [Q2.5] มีสัก line ที่ "ต้องขึ้นทะเบียน" จริงไหม — เช็คแยกจาก Q2 เพื่อให้ข้อความบอกสาเหตุตรงจุด
+  // ไม่เช็คตรงนี้ = PO ที่มีแต่ของราคาต่อชิ้นไม่ถึงเกณฑ์ (เช่น PO เครื่องเขียนล้วน) เปิด draft ได้
+  // แล้วผู้ใช้เจอฟอร์มที่ทุกช่องเป็น lowValue กรอกอะไรไม่ได้เลย กลายเป็นใบเปล่าค้างระบบ
+  // แถมไปกิน uq_asset_request_draft ของ PO ใบนั้นจนคนอื่นสร้างใบใหม่ไม่ได้ด้วย
+  const registrable = po.items.filter((i) => isRegistrable(i.unitPrice));
+  if (registrable.length === 0) {
+    throw new BadRequestError(
+      `PO นี้ไม่มีรายการที่เข้าเกณฑ์สินทรัพย์ (ราคาต่อชิ้นมากกว่า ${ASSET_MIN_UNIT_PRICE.toLocaleString()} บาท) — ทั้งใบลงเป็นค่าใช้จ่าย`,
+    );
+  }
+
+  // ของที่ต้องขึ้นทะเบียนต้องมาถึงแล้วอย่างน้อยหนึ่งรายการ ไม่ใช่แค่ของถูกที่มาถึง
+  if (registrable.every((i) => i.grpoLines.length === 0)) {
+    throw new BadRequestError(
+      'รายการที่เข้าเกณฑ์สินทรัพย์ใน PO นี้ยังไม่ได้รับของ — รอ GRPO ของรายการนั้นก่อน',
+    );
   }
 
   // [Q2 ต่อ — โควตา] เช็คตอน POST /assets ไม่ใช่ตอนสร้าง draft (draft ต้องหลวมไว้ก่อน)

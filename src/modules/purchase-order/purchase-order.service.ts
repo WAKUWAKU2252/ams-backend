@@ -1,7 +1,8 @@
-import { count, eq, ilike, inArray, or, sql } from 'drizzle-orm';
+import { and, count, eq, ilike, inArray, isNull, or, sql } from 'drizzle-orm';
 import { db } from '../../db';
-import { purchaseOrder, purchaseOrderItem, grpoLine } from '../../db/schema';
+import { purchaseOrder, purchaseOrderItem, grpoLine, asset } from '../../db/schema';
 import { NotFoundError } from '../../common/errors';
+import { isRegistrable } from '../../common/asset-policy';
 import { paginate } from '../../common/pagination';
 
 // with นี้ inline ในแต่ละ query (ไม่แยกเป็น const) เพราะ Drizzle infer type ของ callback
@@ -24,37 +25,116 @@ function toReceivedStatus(lines: { ordered: number; received: number }[]): Recei
   return lines.every((l) => l.received >= l.ordered) ? 'full' : 'partial';
 }
 
-/** ยอดรับต่อ line ของ PO ที่ระบุ — query เดียวครอบทุกใบ กัน N+1 ตอนทำหน้า list */
-async function receivedByPo(poNumbers: string[]) {
-  if (poNumbers.length === 0) return new Map<string, { ordered: number; received: number }[]>();
+/**
+ * "งานลงทะเบียนสินทรัพย์ของ PO ใบนี้จบหรือยัง" — คนละคำถามกับ receivedStatus
+ *   Warehouse ถาม "ของมาครบไหม"        -> receivedStatus (นับทุกบรรทัด ของถูกก็ต้องรับเข้าคลัง)
+ *   คนทำทะเบียนถาม "ลงทะเบียนจบไหม"    -> registrationStatus (นับเฉพาะบรรทัดที่เข้าเกณฑ์ราคา)
+ *
+ *   notApplicable  ทั้งใบไม่มีบรรทัดไหนถึงเกณฑ์ราคา — ไม่มีอะไรต้องลงทะเบียน (เช่น PO เครื่องเขียน)
+ *   none           มีของที่ต้องลง แต่ยังไม่ได้ลงสักชิ้น
+ *   partial        ลงไปบ้างแล้ว
+ *   full           ทุกบรรทัดที่เข้าเกณฑ์ลงครบตามจำนวนที่สั่ง
+ *
+ * นับเฉพาะบรรทัดที่เข้าเกณฑ์เท่านั้น ไม่งั้น PO ที่มีเมาส์ปนอยู่จะไม่มีวันขึ้น full
+ */
+export type RegistrationStatus = 'notApplicable' | 'none' | 'partial' | 'full';
 
-  const rows = await db
-    .select({
-      poNumber: purchaseOrderItem.poNumber,
-      ordered: purchaseOrderItem.quantity,
-      // left join แล้ว sum ได้ NULL เมื่อ line นั้นยังไม่เคยมี GRPO — coalesce เป็น 0
-      received: sql<number>`coalesce(sum(${grpoLine.receivedQty}), 0)::int`,
-    })
-    .from(purchaseOrderItem)
-    .leftJoin(grpoLine, eq(grpoLine.poItemId, purchaseOrderItem.id))
-    .where(inArray(purchaseOrderItem.poNumber, poNumbers))
-    .groupBy(purchaseOrderItem.id, purchaseOrderItem.poNumber, purchaseOrderItem.quantity);
+function toRegistrationStatus(
+  lines: { ordered: number; unitPrice: number; registered: number }[],
+): RegistrationStatus {
+  const target = lines.filter((l) => isRegistrable(l.unitPrice));
+  if (target.length === 0) return 'notApplicable';
+  if (target.every((l) => l.registered === 0)) return 'none';
+  return target.every((l) => l.registered >= l.ordered) ? 'full' : 'partial';
+}
 
-  const map = new Map<string, { ordered: number; received: number }[]>();
-  for (const r of rows) {
+interface LineTotals {
+  ordered: number;
+  unitPrice: number;
+  received: number;
+  registered: number;
+}
+
+/**
+ * ยอดรับ + ยอดที่ลงทะเบียนแล้ว ต่อ line ของ PO ที่ระบุ
+ * query เดียวครอบทุกใบ กัน N+1 ตอนทำหน้า list
+ *
+ * แยกสอง aggregate ไม่ join รวมทีเดียว: join grpo_line แล้ว join asset ต่อ จะทำให้แถวคูณกัน
+ * (line มี 2 GRPO x asset 3 ชิ้น = 6 แถว) แล้ว sum(receivedQty) จะบวกซ้ำเป็นเท่าตัว
+ */
+async function totalsByPo(poNumbers: string[]) {
+  const map = new Map<string, LineTotals[]>();
+  if (poNumbers.length === 0) return map;
+
+  const [received, registered] = await Promise.all([
+    db
+      .select({
+        poNumber: purchaseOrderItem.poNumber,
+        itemId: purchaseOrderItem.id,
+        ordered: purchaseOrderItem.quantity,
+        unitPrice: purchaseOrderItem.unitPrice,
+        // left join แล้ว sum ได้ NULL เมื่อ line นั้นยังไม่เคยมี GRPO — coalesce เป็น 0
+        received: sql<number>`coalesce(sum(${grpoLine.receivedQty}), 0)::int`,
+      })
+      .from(purchaseOrderItem)
+      .leftJoin(grpoLine, eq(grpoLine.poItemId, purchaseOrderItem.id))
+      .where(inArray(purchaseOrderItem.poNumber, poNumbers))
+      .groupBy(purchaseOrderItem.id),
+    db
+      .select({
+        itemId: grpoLine.poItemId,
+        registered: count(asset.id),
+      })
+      .from(grpoLine)
+      .innerJoin(asset, and(eq(asset.grpoLineId, grpoLine.id), isNull(asset.deletedAt)))
+      .innerJoin(purchaseOrderItem, eq(purchaseOrderItem.id, grpoLine.poItemId))
+      .where(inArray(purchaseOrderItem.poNumber, poNumbers))
+      .groupBy(grpoLine.poItemId),
+  ]);
+
+  const regByItem = new Map(registered.map((r) => [r.itemId, r.registered]));
+  for (const r of received) {
     const list = map.get(r.poNumber) ?? [];
-    list.push({ ordered: r.ordered, received: r.received });
+    list.push({
+      ordered: r.ordered,
+      unitPrice: r.unitPrice,
+      received: r.received,
+      registered: regByItem.get(r.itemId) ?? 0,
+    });
     map.set(r.poNumber, list);
   }
   return map;
 }
 
-/** เติม ordered/received ต่อ line ให้ frontend ไม่ต้องบวก grpoLines เอง */
-function withLineTotals<T extends { quantity: number; grpoLines: { receivedQty: number }[] }>(
-  item: T,
-) {
+/** จำนวน asset ที่ลงทะเบียนแล้ว แยกตาม po_item — key เป็น itemId ตรง ๆ ไม่พึ่งลำดับแถว */
+async function registeredByItem(poNumbers: string[]) {
+  if (poNumbers.length === 0) return new Map<string, number>();
+
+  const rows = await db
+    .select({ itemId: grpoLine.poItemId, registered: count(asset.id) })
+    .from(grpoLine)
+    .innerJoin(asset, and(eq(asset.grpoLineId, grpoLine.id), isNull(asset.deletedAt)))
+    .innerJoin(purchaseOrderItem, eq(purchaseOrderItem.id, grpoLine.poItemId))
+    .where(inArray(purchaseOrderItem.poNumber, poNumbers))
+    .groupBy(grpoLine.poItemId);
+
+  return new Map(rows.map((r) => [r.itemId, r.registered]));
+}
+
+/** เติม ordered/received/registered ต่อ line ให้ frontend ไม่ต้องบวก grpoLines เอง */
+function withLineTotals<
+  T extends { id: string; quantity: number; unitPrice: number; grpoLines: { receivedQty: number }[] },
+>(item: T, registered: Map<string, number>) {
   const received = item.grpoLines.reduce((sum, l) => sum + l.receivedQty, 0);
-  return { ...item, ordered: item.quantity, received, isFullyReceived: received >= item.quantity };
+  return {
+    ...item,
+    ordered: item.quantity,
+    received,
+    registered: registered.get(item.id) ?? 0,
+    isFullyReceived: received >= item.quantity,
+    // บอกตรง ๆ ว่าบรรทัดนี้ต้องขึ้นทะเบียนไหม frontend จะได้ไม่ต้องรู้เกณฑ์ราคาเอง
+    isRegistrable: isRegistrable(item.unitPrice),
+  };
 }
 
 // ดึงพร้อม items + grpoLines เพื่อให้หน้า Create New Asset รู้ว่าแต่ละ line รับของแล้วกี่ชิ้น
@@ -71,9 +151,15 @@ export async function findAll() {
     orderBy: (po, { desc }) => [desc(po.poDate)],
   });
 
+  const registered = await registeredByItem(rows.map((r) => r.poNumber));
   return rows.map((po) => {
-    const items = po.items.map(withLineTotals);
-    return { ...po, items, receivedStatus: toReceivedStatus(items) };
+    const items = po.items.map((item) => withLineTotals(item, registered));
+    return {
+      ...po,
+      items,
+      receivedStatus: toReceivedStatus(items),
+      registrationStatus: toRegistrationStatus(items),
+    };
   });
 }
 
@@ -89,8 +175,14 @@ export async function findOneOrFail(poNumber: string) {
   });
   if (!po) throw new NotFoundError(`Purchase order ${poNumber}`);
 
-  const items = po.items.map(withLineTotals);
-  return { ...po, items, receivedStatus: toReceivedStatus(items) };
+  const registered = await registeredByItem([poNumber]);
+  const items = po.items.map((item) => withLineTotals(item, registered));
+  return {
+    ...po,
+    items,
+    receivedStatus: toReceivedStatus(items),
+    registrationStatus: toRegistrationStatus(items),
+  };
 }
 
 interface FindPageParams {
@@ -116,12 +208,16 @@ export async function findPage({ page, limit, search }: FindPageParams) {
     db.select({ value: count() }).from(purchaseOrder).where(where),
   ]);
 
-  // เติมสถานะการรับของโดยไม่พ่วง items/grpoLines กลับไป — หน้า list ยังเบาเหมือนเดิม
-  const received = await receivedByPo(rows.map((r) => r.poNumber));
-  const data = rows.map((po) => ({
-    ...po,
-    receivedStatus: toReceivedStatus(received.get(po.poNumber) ?? []),
-  }));
+  // เติมสถานะทั้งสองโดยไม่พ่วง items/grpoLines กลับไป — หน้า list ยังเบาเหมือนเดิม
+  const totals = await totalsByPo(rows.map((r) => r.poNumber));
+  const data = rows.map((po) => {
+    const lines = totals.get(po.poNumber) ?? [];
+    return {
+      ...po,
+      receivedStatus: toReceivedStatus(lines),
+      registrationStatus: toRegistrationStatus(lines),
+    };
+  });
 
   return paginate(data, totalResult[0].value, page, limit);
 }

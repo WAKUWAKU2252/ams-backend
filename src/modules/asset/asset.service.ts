@@ -24,19 +24,14 @@ import {
   employee,
 } from '../../db/schema';
 import { NotFoundError, BadRequestError, ConflictError } from '../../common/errors';
+import { ASSET_MIN_UNIT_PRICE, isRegistrable } from '../../common/asset-policy';
 import { createAssetBody, updateAssetBody } from './asset.schema';
 
 type CreateBody = typeof createAssetBody.static;
 type UpdateBody = typeof updateAssetBody.static;
 
-/**
- * เพดานล่างของราคาต่อหน่วยที่ถือเป็น "สินทรัพย์" — ต่ำกว่านี้ลงบัญชีเป็นค่าใช้จ่าย
- * ไม่ต้องขึ้นทะเบียนติดตาม (ของถูกมูลค่าน้อย ต้นทุนติดตามแพงกว่าตัวของ)
- *
- * เช็คที่ backend ด้วยไม่ใช่แค่ front: หน้าเว็บ disable ปุ่มได้ก็จริง แต่ยิง API ตรงยังผ่าน
- * TODO: ย้ายไปเป็นค่าตั้งค่าระบบเมื่อมีตาราง config — ตอนนี้บัญชีเปลี่ยนเกณฑ์ต้องแก้โค้ด
- */
-const ASSET_MIN_UNIT_PRICE = 5000;
+// เกณฑ์ราคาอยู่ที่ common/asset-policy — เช็คที่ service ด้วยไม่ใช่แค่ front
+// เพราะหน้าเว็บ disable ปุ่มได้ก็จริง แต่ยิง API ตรงยังผ่าน
 
 // ── ตัวช่วยที่ใช้ร่วมกันระหว่าง create กับ update ─────────────────────────────
 
@@ -139,7 +134,7 @@ export async function create(body: CreateBody) {
   }
 
   // [Q3] ของชิ้นนี้เข้าเกณฑ์สินทรัพย์ไหม — ต่ำกว่าเกณฑ์ลงบัญชีเป็นค่าใช้จ่าย ไม่ขึ้นทะเบียน
-  if (line.poItem.unitPrice <= ASSET_MIN_UNIT_PRICE) {
+  if (!isRegistrable(line.poItem.unitPrice)) {
     throw new BadRequestError(
       `"${line.poItem.itemDescription}" ราคาต่อหน่วย ${line.poItem.unitPrice.toLocaleString()} บาท ` +
         `ไม่ถึงเกณฑ์สินทรัพย์ (มากกว่า ${ASSET_MIN_UNIT_PRICE.toLocaleString()} บาท) — ลงเป็นค่าใช้จ่ายแทน`,
@@ -278,7 +273,7 @@ export async function findSlotsByRequest(requestId: number) {
     items: request.purchaseOrder.items.map((item) => {
       const received = item.grpoLines.reduce((sum, l) => sum + l.receivedQty, 0);
       const mine = registered.filter((a) => item.grpoLines.some((l) => l.id === a.grpoLineId));
-      const isLowValue = item.unitPrice <= ASSET_MIN_UNIT_PRICE;
+      const isLowValue = !isRegistrable(item.unitPrice);
 
       const slots = Array.from({ length: item.quantity }, (_, i) => {
         const existing = mine[i];
