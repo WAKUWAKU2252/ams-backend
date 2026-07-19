@@ -1,0 +1,43 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// attachment — ตาราง "ไฟล์" ล้วน ไม่รู้จักใครทั้งนั้น ฝั่งเจ้าของเป็นคนถือ FK ชี้เข้ามา
+// (grpo.invoiceId / asset.imageId) — เดิมเป็น polymorphic (entityType + entityId)
+// ซึ่ง pg บังคับ integrity ให้ไม่ได้เลย: ใส่ entityId ที่ไม่มีจริงก็ insert ผ่าน
+//
+// ทำไมไม่แยกเป็นตาราง invoice / asset_image: metadata เหมือนกันทุกคอลัมน์ แยกแล้ว
+// logic upload / soft delete / cleanup / ย้ายไป NAS ต้องทำซ้ำสองชุด และเอกสารชนิดที่ 3
+// (Movement) จะตามมาอีก — ใช้ docType แยกชนิดพอ ส่วนความปลอดภัยได้จาก composite FK
+// ที่ฝั่ง grpo/asset ซึ่งอ้าง unique (id, docType) ข้างล่าง
+// ═══════════════════════════════════════════════════════════════════════════
+import { pgTable, pgEnum, uuid, varchar, integer, unique } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
+import { isoTimestamp } from './_shared';
+
+// ต้อง export — drizzle-kit อ่านเฉพาะ export ตอน push ไม่งั้นไม่สร้าง CREATE TYPE ให้
+// ชนิดของเอกสาร (คนละแกนกับ "เอกสารนี้เป็นของใคร" ซึ่งฝั่งเจ้าของถือ FK เอง)
+export const enumDocType = pgEnum('doc_type', ['INVOICE', 'ASSET_IMG']);
+
+export const attachment = pgTable(
+  'attachment',
+  {
+    id: uuid()
+      .default(sql`uuid_generate_v4()`)
+      .primaryKey()
+      .notNull(),
+    docType: enumDocType().notNull(),
+    originalName: varchar({ length: 255 }).notNull(),
+    storedName: varchar({ length: 100 }).notNull(),
+    mimeType: varchar({ length: 100 }).notNull(),
+    size: integer().notNull(),
+    createdAt: isoTimestamp()
+      .default(sql`now()`)
+      .notNull(),
+    deletedAt: isoTimestamp(),
+  },
+  (table) => [
+    // ปลายทางของ composite FK ฝั่ง grpo/asset — บังคับให้ asset.imageId ชี้ได้เฉพาะแถว
+    // ASSET_IMG และ grpo.invoiceId ชี้ได้เฉพาะ INVOICE (แนบผิดชนิด = insert ไม่ผ่านตั้งแต่ DB)
+    // ต้องเป็น unique() ไม่ใช่ uniqueIndex(): drizzle-kit introspect unique index ที่ขึ้นต้น
+    // ด้วย primary key ไม่ติด แล้วจะสั่งสร้างซ้ำทุกครั้งที่ push จน push พังถาวร
+    unique('uq_attachment_id_doc_type').on(table.id, table.docType),
+  ],
+);

@@ -3,7 +3,7 @@ import { defineConfig } from 'drizzle-kit';
 // drizzle-kit เป็น tooling แยกจาก runtime ของ Bun — ใช้ process.env (kit โหลด .env ให้เอง)
 export default defineConfig({
   dialect: 'postgresql',
-  schema: './src/db/schema.ts',
+  schema: './src/db/schema',
   out: './src/db/migrations',
   dbCredentials: {
     host: process.env.DB_HOST ?? 'localhost',
