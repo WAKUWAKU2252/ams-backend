@@ -7,7 +7,6 @@ export const assetListQuery = t.Object({
   requestId: t.Numeric(),
 });
 
-// unitNo ไม่รับจาก client — service ออกให้เอง กันสองคนกรอกพร้อมกันแล้วชนเลขเดียวกัน
 export const createAssetBody = t.Object({
   requestId: t.Integer({ minimum: 1 }),
   // ชิ้นนี้มาจากรอบรับของไหน — ตัวนี้เองที่บังคับว่าลงทะเบียนได้เฉพาะของที่รับแล้ว

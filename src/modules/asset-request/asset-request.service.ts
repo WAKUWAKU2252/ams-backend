@@ -1,18 +1,17 @@
 // ═══ asset-request.service.ts — สมองของ module ═══
 // กฎเหล็กเดิม: TypeScript ล้วน ห้าม import จาก 'elysia' / ห้าม any / error โยน AppError
 //
-// [วิธีคิดของ createDraft — ลำดับการตรวจคือการเล่าเหตุผลทางธุรกิจ]
-// การสร้าง draft ไม่ใช่แค่ INSERT — มันคือการตอบคำถาม 3 ข้อ "ตามลำดับ":
-//   Q1 เป้าที่ชี้มีจริงไหม?           (PO ใบนี้มีตัวตน)               → ไม่มี  = 404
-//   Q2 เป้าพร้อมให้ลงทะเบียนไหม?     (มีสัก line ที่รับของแล้ว)        → ไม่พร้อม = 400
-//   Q3 PO นี้มี draft ค้างอยู่แล้วหรือเปล่า? (ใครสร้างไว้ก็ตาม)         → มี = คืนใบเดิมให้ทำต่อ
-// สังเกต: เรียงจากพื้นฐานสุดไปเฉพาะทางสุด และทุก error ต้องบอกสิ่งที่ผู้ใช้ "แก้ได้"
-// ("ยังไม่มีการรับของ" ผู้ใช้รู้ว่าต้องรอ GRPO — ต่างจาก "invalid request" ที่ไร้ประโยชน์)
+// [วิธีคิดของ createDraft]
+//   Q1 เป้าที่ชี้มีจริงไหม?                 (PO ใบนี้มีตัวตน)      → ไม่มี = 404
+//   Q2 PO นี้มี draft ค้างอยู่แล้วหรือเปล่า?  (ใครสร้างไว้ก็ตาม)     → มี = คืนใบเดิมให้ทำต่อ
+//
+// จงใจไม่มีด่าน "ต้องรับของแล้วถึงเปิดใบได้" — เปิดดูได้เสมอ ของที่ยังไม่มาถึง
+// จะขึ้นสถานะ noGrpo ให้เห็น แล้ว frontend เป็นคนกันไม่ให้กรอก
 
 import { and, count, desc, eq, isNull } from 'drizzle-orm';
 import { db } from '../../db';
 import { assetRequest, purchaseOrder } from '../../db/schema';
-import { NotFoundError, BadRequestError } from '../../common/errors';
+import { NotFoundError } from '../../common/errors';
 import { paginate } from '../../common/pagination';
 import { listQuery } from './asset-request.schema';
 
@@ -32,11 +31,11 @@ export async function createDraft(poNumber: string, createBy: string) {
     throw new NotFoundError(`Purchase order ${poNumber}`);
   }
 
-  // [Q2] มีสัก line ที่ตรวจรับแล้วไหม
-  if (po.items.every((i) => i.grpoLines.length === 0)) {
-    throw new BadRequestError('PO นี้ยังไม่เคยมีการรับของ (GRPO) — ลงทะเบียนได้เฉพาะของที่ตรวจรับแล้ว');
-  }
-
+  // จงใจ "ไม่" บล็อก PO ที่ยังไม่มีการรับของ — เปิดใบดูได้เสมอ ทุกแถวจะขึ้นสถานะ noGrpo
+  // ให้เห็นว่ามีของอะไรรออยู่บ้าง แล้ว frontend เป็นคนกันไม่ให้กรอก
+  // (ด่านจริงอยู่ที่ POST /assets ซึ่งต้องอ้าง grpoLineId ที่มีตัวตน — ไม่มีรอบรับของ
+  //  ก็ไม่มี id ให้ส่ง สร้าง asset ไม่ได้อยู่ดี ไม่ว่าจะยิง API ตรงหรือผ่านหน้าจอ)
+  //
   // โควตาต่อรายการเช็คตอน POST /assets ไม่ใช่ตอนสร้าง draft (draft ต้องหลวมไว้ก่อน)
   //
   // ★ สองตัวเลขคนละหน้าที่ อย่าสับสน:

@@ -33,8 +33,6 @@ export const asset = pgTable(
 
     // ชี้กลับใบคำขอที่ทำให้ชิ้นนี้เกิด
     requestId: integer().notNull(),
-    // ลำดับเครื่องภายในคำขอ — คู่กับ requestId เป็นกุญแจกันแถวซ้ำ (ดู uq_asset_unit)
-    unitNo: integer().notNull(),
     // ชิ้นนี้มาจากรอบรับของ (GRPO) ไหน — grpo_line ชี้ต่อไปที่ grpo และ poItem ในตัว
     // จึงไต่กลับหา PO line และเลข GRPO ได้โดยไม่ต้องเก็บซ้ำ
     grpoLineId: uuid().notNull(),
@@ -130,8 +128,6 @@ export const asset = pgTable(
     // ใช้ตอน join/นับ asset ของคำขอ และของรอบรับของ
     index('idx_asset_request_id').on(table.requestId),
     index('idx_asset_grpo_line_id').on(table.grpoLineId),
-    // กันดับเบิลคลิกแล้วได้แถวซ้ำ: 1 คำขอมี unit_no ซ้ำไม่ได้ (นับเฉพาะที่ยังไม่ถูกลบ)
-    uniqueIndex('uq_asset_unit').on(table.requestId, table.unitNo).where(sql`${table.deletedAt} IS NULL`),
     // เลข SAP ต้องไม่ซ้ำ — pg ยอมหลาย NULL อยู่แล้ว (ช่วง DRAFT ยังไม่มีเลข)
     uniqueIndex('uq_asset_number').on(table.assetNumber),
     // 1 ไฟล์รูป = 1 ชิ้น ห้ามใช้ร่วม — เปลี่ยนรูปต้องอัปไฟล์ใหม่แล้วสลับ imageId

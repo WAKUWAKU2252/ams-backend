@@ -9,7 +9,7 @@
 //   Q5 รูปที่แนบเป็นรูปจริงและยังว่างไหม                          → 400 / 409
 // ทุก error ต้องบอกสิ่งที่ผู้ใช้ "แก้ได้" ไม่ใช่แค่ว่า invalid
 
-import { and, count, eq, inArray, isNull, max } from 'drizzle-orm';
+import { and, count, eq, inArray, isNull } from 'drizzle-orm';
 import { db } from '../../db';
 import {
   asset,
@@ -101,7 +101,9 @@ async function assertImageUsable(imageId: string, exceptAssetId?: number) {
 
   const used = await db.query.asset.findFirst({ where: eq(asset.imageId, imageId) });
   if (used && used.id !== exceptAssetId) {
-    throw new ConflictError(`รูปนี้ถูกใช้กับสินทรัพย์ชิ้นอื่นแล้ว (unit ${used.unitNo})`);
+    throw new ConflictError(
+      `รูปนี้ถูกใช้กับสินทรัพย์ชิ้นอื่นแล้ว (${used.serialNumber ?? `asset id ${used.id}`})`,
+    );
   }
 }
 
@@ -172,18 +174,10 @@ export async function create(body: CreateBody) {
   await assertMasterUsable(body);
   if (body.imageId) await assertImageUsable(body.imageId);
 
-  // unitNo ออกให้เอง ไม่รับจาก client — ถ้าให้ client ส่ง สองคนกรอกพร้อมกันจะชนเลขเดียวกัน
-  // (uq_asset_unit จะเป็นด่านสุดท้ายที่จับได้ แต่ผู้ใช้จะเจอ error โดยไม่เข้าใจว่าทำอะไรผิด)
-  const [{ value: lastUnit }] = await db
-    .select({ value: max(asset.unitNo) })
-    .from(asset)
-    .where(eq(asset.requestId, body.requestId));
-
   const [row] = await db
     .insert(asset)
     .values({
       requestId: body.requestId,
-      unitNo: (lastUnit ?? 0) + 1,
       grpoLineId: body.grpoLineId,
       description: body.description ?? line.poItem.itemDescription,
       serialNumber: body.serialNumber,
@@ -252,7 +246,8 @@ export async function findSlotsByRequest(requestId: number) {
   const registered = await db.query.asset.findMany({
     where: and(eq(asset.requestId, requestId), isNull(asset.deletedAt)),
     with: { grpoLine: { with: { grpo: true } } },
-    orderBy: (a, { asc }) => [asc(a.unitNo)],
+    // id เป็น serial — เรียงตาม id คือเรียงตามลำดับที่ผู้ใช้กรอกเข้ามา
+    orderBy: (a, { asc }) => [asc(a.id)],
   });
 
   return {
@@ -270,7 +265,6 @@ export async function findSlotsByRequest(requestId: number) {
             index: i + 1,
             status: 'registered' as const,
             assetId: existing.id,
-            unitNo: existing.unitNo,
             serialNumber: existing.serialNumber,
             grpoNo: existing.grpoLine.grpo.grpoNo,
           };
