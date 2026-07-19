@@ -11,6 +11,7 @@ import {
   numeric,
   customType,
   pgEnum,
+  boolean,
   unique,
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
@@ -263,19 +264,146 @@ export const assetRequestRelations = relations(assetRequest, ({ one, many }) => 
 }));
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Master data — ตรงกับ Masterdata.xlsx sheet Category / Uom / Department /
+// Asset location / Asset sub location / Employee
+//
+// กติกาที่ใช้ร่วมกันทุกตารางในกลุ่มนี้:
+//   - ชื่อที่ผู้ใช้เห็นต้อง UNIQUE — ถ้าซ้ำได้ dropdown จะมีตัวเลือกหน้าตาเหมือนกันเป๊ะ
+//     ผู้ใช้เลือกคนละ id แล้วรายงานแยกกลุ่มเพี้ยนถาวรโดยไม่มีใครรู้
+//   - isActive แทนการลบ — แถวที่ถูก asset อ้างถึงแล้วลบจริงไม่ได้ (FK กันอยู่)
+//     ต้องปิดใช้เพื่อไม่ให้โผล่ใน dropdown ใหม่ แต่ของเก่ายังชี้ได้อยู่
+//   - createdAt/updatedAt ครบทุกตาราง — ข้อมูลอ้างอิงเปลี่ยนแล้วต้องสาวกลับได้ว่า
+//     เปลี่ยนเมื่อไหร่ (วัตถุประสงค์ข้อ 4 ของโปรเจกต์: รองรับการตรวจสอบภายใน)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const category = pgTable(
+  'category',
+  {
+    id: serial().primaryKey().notNull(),
+    name: varchar({ length: 100 }).notNull(),
+    isActive: boolean().default(true).notNull(),
+    createdAt: isoTimestamp().default(sql`now()`).notNull(),
+    updatedAt: isoTimestamp().default(sql`now()`).notNull(),
+  },
+  (table) => [unique('uq_category_name').on(table.name)],
+);
+
+export const uom = pgTable(
+  'uom',
+  {
+    id: serial().primaryKey().notNull(),
+    name: varchar({ length: 100 }).notNull(),
+    isActive: boolean().default(true).notNull(),
+    createdAt: isoTimestamp().default(sql`now()`).notNull(),
+    updatedAt: isoTimestamp().default(sql`now()`).notNull(),
+  },
+  (table) => [unique('uq_uom_name').on(table.name)],
+);
+
+export const department = pgTable(
+  'department',
+  {
+    id: serial().primaryKey().notNull(),
+    name: varchar({ length: 100 }).notNull(),
+    shortName: varchar({ length: 20 }),
+    // ศูนย์ต้นทุนซ้ำ = ค่าใช้จ่ายไปผูกผิดแผนก แก้ย้อนหลังยากเพราะงบถูกปิดงวดไปแล้ว
+    costCenter: varchar({ length: 100 }),
+    isActive: boolean().default(true).notNull(),
+    createdAt: isoTimestamp().default(sql`now()`).notNull(),
+    updatedAt: isoTimestamp().default(sql`now()`).notNull(),
+  },
+  (table) => [unique('uq_department_cost_center').on(table.costCenter)],
+);
+
+export const assetLocation = pgTable('asset_location', {
+  id: serial().primaryKey().notNull(),
+  name: varchar({ length: 100 }).notNull(),
+  // ว่างได้ — ตอนเปิดสถานที่ใหม่ยังไม่มีรูปผัง ไม่ควรบล็อกการสร้างข้อมูล
+  mapUrl: varchar({ length: 500 }),
+  isActive: boolean().default(true).notNull(),
+  createdAt: isoTimestamp().default(sql`now()`).notNull(),
+  updatedAt: isoTimestamp().default(sql`now()`).notNull(),
+});
+
+export const assetSubLocation = pgTable(
+  'asset_sub_location',
+  {
+    id: serial().primaryKey().notNull(),
+    locationId: integer().notNull(),
+    // text ไม่ใช่ number: มีชั้นที่ไม่ใช่ตัวเลข เช่น B1, M
+    floor: varchar({ length: 100 }),
+    room: varchar({ length: 100 }),
+    remark: varchar({ length: 255 }),
+    isActive: boolean().default(true).notNull(),
+    createdAt: isoTimestamp().default(sql`now()`).notNull(),
+    updatedAt: isoTimestamp().default(sql`now()`).notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.locationId],
+      foreignColumns: [assetLocation.id],
+      name: 'fk_asset_sub_location_location',
+    }),
+    index('idx_asset_sub_location_location_id').on(table.locationId),
+    // กันสร้างจุดเดิมซ้ำ (อาคารเดียวกัน ชั้น 2 ห้อง 201 ถูกเพิ่มสองครั้ง) ซึ่งจะทำให้
+    // asset สองชิ้นอยู่ห้องเดียวกันจริงแต่ชี้คนละ id — รายงานตามสถานที่จะแตกเป็นสองก้อน
+    unique('uq_asset_sub_location').on(table.locationId, table.floor, table.room),
+  ],
+);
+
+export const employee = pgTable(
+  'employee',
+  {
+    // ไม่ใช่ serial — เป็นรหัสพนักงานที่รับมาจากระบบ HR ต้องใส่ค่าเองตอน insert
+    id: integer().primaryKey().notNull(),
+    name: varchar({ length: 100 }).notNull(),
+    email: varchar({ length: 100 }).notNull(),
+    departmentId: integer().notNull(),
+    // ลาออกแล้วปิดใช้ ไม่ลบ — asset ที่เคยอยู่ในความรับผิดชอบต้องยังสาวกลับได้ว่าเป็นของใคร
+    isActive: boolean().default(true).notNull(),
+    createdAt: isoTimestamp().default(sql`now()`).notNull(),
+    updatedAt: isoTimestamp().default(sql`now()`).notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.departmentId],
+      foreignColumns: [department.id],
+      name: 'fk_employee_department',
+    }),
+    index('idx_employee_department_id').on(table.departmentId),
+    unique('uq_employee_email').on(table.email),
+  ],
+);
+
+export const departmentRelations = relations(department, ({ many }) => ({
+  employees: many(employee),
+}));
+
+export const employeeRelations = relations(employee, ({ one }) => ({
+  department: one(department, {
+    fields: [employee.departmentId],
+    references: [department.id],
+  }),
+}));
+
+export const assetLocationRelations = relations(assetLocation, ({ many }) => ({
+  subLocations: many(assetSubLocation),
+}));
+
+export const assetSubLocationRelations = relations(assetSubLocation, ({ one }) => ({
+  location: one(assetLocation, {
+    fields: [assetSubLocation.locationId],
+    references: [assetLocation.id],
+  }),
+}));
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ตาราง asset — ตรงกับ Masterdata.xlsx sheet "Asset"
 // แถว asset เกิดตั้งแต่กด "ลงทะเบียน" ในคำขอ (lifecycle=DRAFT) — ระบบอื่น
 // (Dashboard/Audit/Report) ต้อง query เฉพาะ lifecycle='REGISTERED' เสมอ
 //
-// [FK ที่ยัง "ผูกจริงไม่ได้" เพราะตารางปลายทางยังไม่เกิด] — เก็บเป็นคอลัมน์ไว้ก่อน
-// ตาม Masterdata แต่ยังไม่ใส่ foreignKey() จนกว่าตารางเหล่านี้จะถูกสร้าง:
-//   categoryId -> Category / uomId -> Uom / employeeId -> Employee
-//   locationId -> Asset location / subLocationId -> Asset sub location
-//   createdBy/updatedBy/deletedBy -> User
-// TODO: เมื่อสร้างตาราง master เหล่านี้แล้ว เพิ่ม foreignKey() + index ให้ครบ
-//
-// [ผลที่ตามมาต่อ flow ลงทะเบียน] categoryId/uomId/locationId เป็น NOT NULL ตาม Masterdata
-// → การ insert asset จริง (เฟสฟอร์ม) ยังทำไม่ได้จนกว่าจะมีตาราง master + ตัวเลือกใน UI
+// FK ไป master data ผูกครบแล้ว (category / uom / asset_location / asset_sub_location /
+// employee) — ไม่ cascade ทุกตัว: master ถูกลบไม่ได้ถ้ายังมี asset ชี้อยู่ ต้องปิด isActive แทน
 //
 // createdBy/updatedBy/deletedBy: Masterdata = INTEGER FK->User แต่ใช้ varchar ชั่วคราว
 // ให้สอดคล้องกับ asset_request (ยังไม่มี auth) — TODO(auth): เปลี่ยนเป็น FK -> users
@@ -310,7 +438,7 @@ export const asset = pgTable(
     description: varchar({ length: 100 }),
     serialNumber: varchar({ length: 100 }),
 
-    categoryId: integer().notNull(), // FK -> Category (ยังไม่มีตาราง)
+    categoryId: integer().notNull(),
     assetClass: varchar({ length: 50 }),
     qrCode: varchar({ length: 255 }),
 
@@ -319,10 +447,12 @@ export const asset = pgTable(
     // สภาพการใช้งานจริง — มีความหมายเมื่อ REGISTERED แล้ว (ระหว่าง DRAFT ตั้ง Active รอไว้)
     status: enumAssetStatus().default('Active'),
 
-    uomId: integer().notNull(), // FK -> Uom (ยังไม่มีตาราง)
-    employeeId: integer(), // FK -> Employee (ยังไม่มีตาราง)
-    locationId: integer().notNull(), // FK -> Asset location (ยังไม่มีตาราง)
-    subLocationId: integer(), // FK -> Asset sub location (ยังไม่มีตาราง)
+    uomId: integer().notNull(),
+    // ว่างได้: ของที่รับเข้าคลังแล้วยังไม่จ่ายให้ใครถือ ยังไม่มีผู้รับผิดชอบ
+    employeeId: integer(),
+    locationId: integer().notNull(),
+    // ว่างได้: บางที่ระบุแค่อาคาร ไม่ได้ลงลึกถึงชั้น/ห้อง
+    subLocationId: integer(),
 
     warrantyStartDate: isoTimestamp(),
     warrantyEndDate: isoTimestamp(),
@@ -360,6 +490,36 @@ export const asset = pgTable(
       foreignColumns: [attachment.id, attachment.docType],
       name: 'fk_asset_image',
     }),
+    // FK ไป master — ไม่ cascade: ลบ category ที่มี asset ใช้อยู่ไม่ได้ ต้องปิด isActive แทน
+    foreignKey({
+      columns: [table.categoryId],
+      foreignColumns: [category.id],
+      name: 'fk_asset_category',
+    }),
+    foreignKey({
+      columns: [table.uomId],
+      foreignColumns: [uom.id],
+      name: 'fk_asset_uom',
+    }),
+    foreignKey({
+      columns: [table.locationId],
+      foreignColumns: [assetLocation.id],
+      name: 'fk_asset_location',
+    }),
+    foreignKey({
+      columns: [table.subLocationId],
+      foreignColumns: [assetSubLocation.id],
+      name: 'fk_asset_sub_location',
+    }),
+    foreignKey({
+      columns: [table.employeeId],
+      foreignColumns: [employee.id],
+      name: 'fk_asset_employee',
+    }),
+    // pg ไม่สร้าง index ให้ฝั่ง FK เอง — ใช้ตอนกรองตามหมวด/สถานที่/ผู้ถือครองใน Dashboard
+    index('idx_asset_category_id').on(table.categoryId),
+    index('idx_asset_location_id').on(table.locationId),
+    index('idx_asset_employee_id').on(table.employeeId),
     // pg ไม่สร้าง index ให้ฝั่ง FK เอง — ใช้ตอน join/นับ asset ของคำขอ และของรอบรับของ
     index('idx_asset_request_id').on(table.requestId),
     index('idx_asset_grpo_line_id').on(table.grpoLineId),
@@ -385,6 +545,26 @@ export const assetRelations = relations(asset, ({ one }) => ({
   image: one(attachment, {
     fields: [asset.imageId],
     references: [attachment.id],
+  }),
+  category: one(category, {
+    fields: [asset.categoryId],
+    references: [category.id],
+  }),
+  uom: one(uom, {
+    fields: [asset.uomId],
+    references: [uom.id],
+  }),
+  location: one(assetLocation, {
+    fields: [asset.locationId],
+    references: [assetLocation.id],
+  }),
+  subLocation: one(assetSubLocation, {
+    fields: [asset.subLocationId],
+    references: [assetSubLocation.id],
+  }),
+  employee: one(employee, {
+    fields: [asset.employeeId],
+    references: [employee.id],
   }),
 }));
 
