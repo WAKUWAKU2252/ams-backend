@@ -1,28 +1,41 @@
-// src/config/env.ts
-import { t } from 'elysia';
-import { Value } from '@sinclair/typebox/value';
+import { Elysia } from 'elysia';
+import { jwt } from '@elysiajs/jwt';
+import { env } from '../config/env';
+import { UnauthorizedError, ForbiddenError } from '../common/errors';
 
-// 1) ประกาศ "สัญญา" ว่าแอปนี้ต้องการ env อะไรบ้าง ชนิดไหน
-const EnvSchema = t.Object({
-  PORT: t.Number({ default: 3000 }),
-  DB_HOST: t.String(),
-  DB_PORT: t.Number(),
-  DB_USERNAME: t.String(),
-  DB_PASSWORD: t.String(),
-  DB_NAME: t.String(),
-  CORS_ORIGIN: t.String({ default: 'http://localhost:5173' }),
+// sign/verify JWT — ตั้ง secret + อายุ token ที่เดียว (ยังไม่ทำ refresh token ระยะนี้)
+export const jwtPlugin = jwt({
+  name: 'jwt',
+  secret: env.JWT_SECRET,
+  exp: env.JWT_EXPIRES_IN,
 });
 
-// 2) Convert: ค่าใน .env เป็น string ล้วน ("3000") — แปลงเป็นชนิดจริง (3000) ตาม schema
-const parsed = Value.Convert(EnvSchema, Value.Default(EnvSchema, { ...Bun.env }));
+export const authGuard = new Elysia({ name: 'authGuard' })
+  .use(jwtPlugin)
+  .derive({ as: 'scoped' }, async ({ jwt, headers }) => {
+    const header = headers.authorization;
+    const token = header?.startsWith('Bearer ') ? header.slice(7) : null;
+    if (!token) throw new UnauthorizedError();
 
-// 3) Check: ถ้าไม่ผ่าน = โยน error ทันที แอปไม่ขึ้น — นี่คือ fail fast
-if (!Value.Check(EnvSchema, parsed)) {
-  const details = [...Value.Errors(EnvSchema, parsed)]
-    .map((e) => `  ${e.path.slice(1)}: ${e.message}`)
-    .join('\n');
-  throw new Error(`Environment variables ไม่ครบหรือผิดชนิด:\n${details}\n(เช็คไฟล์ .env เทียบกับ .env.example)`);
-}
+    const payload = await jwt.verify(token);
+    if (!payload || typeof payload.sub !== 'string') {
+      throw new UnauthorizedError('token ไม่ถูกต้องหรือหมดอายุ');
+    }
 
-// 4) export ตัวเดียว — ที่อื่นห้ามแตะ Bun.env อีก
-export const env: typeof EnvSchema.static = parsed;
+    return {
+      currentUser: {
+        id: Number(payload.sub),
+        role: String(payload.role)
+      },
+    };
+  });
+
+// requireRole('MANAGER', 'FINANCE') — บังคับ role ต่อจาก authGuard
+// ใช้: new Elysia().use(requireRole('FINANCE')).get(...)  → 401 ถ้าไม่ล็อกอิน, 403 ถ้า role ไม่ตรง
+export const requireRole = (...roles: string[]) =>
+  new Elysia()
+    .use(authGuard)
+    .onBeforeHandle({ as: 'scoped' }, ({ currentUser }) => {
+      if (!currentUser) throw new UnauthorizedError();
+      if (!roles.includes(currentUser.role)) throw new ForbiddenError();
+    });

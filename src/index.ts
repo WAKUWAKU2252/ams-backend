@@ -22,3 +22,4 @@ const runCleanup = () =>
 
 runCleanup(); // รอบแรกทันทีตอน boot — เก็บของค้างช่วง server ปิด
 setInterval(runCleanup, 60 * 60 * 1000); // แล้วชั่วโมงละครั้ง (ขยะเน่าช้า ไม่ต้องถี่)
+

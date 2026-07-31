@@ -11,6 +11,7 @@ export default defineConfig({
     user: process.env.DB_USERNAME ?? 'postgres',
     password: process.env.DB_PASSWORD ?? 'postgres',
     database: process.env.DB_NAME ?? 'ams_db',
-    ssl: false,
+    // local ไม่ตั้ง = false เหมือนเดิม / server จริงตั้ง DB_SSL=true
+    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: true } : false,
   },
 });

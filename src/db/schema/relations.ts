@@ -14,7 +14,10 @@ import { purchaseOrder, purchaseOrderItem } from './purchase';
 import { attachment } from './attachment';
 import { grpo, grpoLine } from './grpo';
 import { assetRequest } from './asset-request';
+import { assetRequestOpener } from './asset-request-opener';
+import { assetRequestLine } from './asset-request-line';
 import { category, uom, department, assetLocation, assetSubLocation, employee } from './master';
+import { role, user } from './user';
 import { asset } from './asset';
 
 export const purchaseOrderRelations = relations(purchaseOrder, ({ many }) => ({
@@ -48,6 +51,8 @@ export const grpoLineRelations = relations(grpoLine, ({ one, many }) => ({
     references: [purchaseOrderItem.id],
   }),
   assets: many(asset),
+  // จำนวนชิ้นที่คนแจ้งไว้สำหรับรอบนี้ (คำขอละไม่เกินหนึ่งแถว)
+  declaredLines: many(assetRequestLine),
 }));
 
 export const assetRequestRelations = relations(assetRequest, ({ one, many }) => ({
@@ -56,6 +61,43 @@ export const assetRequestRelations = relations(assetRequest, ({ one, many }) => 
     references: [purchaseOrder.poNumber],
   }),
   assets: many(asset),
+  openers: many(assetRequestOpener),
+  // จำนวนที่แจ้งเองรายรอบรับของ — มีเฉพาะรอบที่ตัวเลข SAP ใช้ไม่ได้
+  lines: many(assetRequestLine),
+  createdByUser: one(user, {
+    fields: [assetRequest.createdBy],
+    references: [user.id],
+  }),
+}));
+
+export const assetRequestOpenerRelations = relations(assetRequestOpener, ({ one }) => ({
+  request: one(assetRequest, {
+    fields: [assetRequestOpener.requestId],
+    references: [assetRequest.id],
+  }),
+  user: one(user, {
+    fields: [assetRequestOpener.userId],
+    references: [user.id],
+  }),
+}));
+
+export const assetRequestLineRelations = relations(assetRequestLine, ({ one }) => ({
+  request: one(assetRequest, {
+    fields: [assetRequestLine.requestId],
+    references: [assetRequest.id],
+  }),
+  grpoLine: one(grpoLine, {
+    fields: [assetRequestLine.grpoLineId],
+    references: [grpoLine.id],
+  }),
+  createdByUser: one(user, {
+    fields: [assetRequestLine.createdBy],
+    references: [user.id],
+  }),
+  updatedByUser: one(user, {
+    fields: [assetRequestLine.updatedBy],
+    references: [user.id],
+  }),
 }));
 
 export const departmentRelations = relations(department, ({ many }) => ({
@@ -66,6 +108,21 @@ export const employeeRelations = relations(employee, ({ one }) => ({
   department: one(department, {
     fields: [employee.departmentId],
     references: [department.id],
+  }),
+}));
+
+export const roleRelations = relations(role, ({ many }) => ({
+  users: many(user),
+}));
+
+export const userRelations = relations(user, ({ one }) => ({
+  role: one(role, {
+    fields: [user.roleId],
+    references: [role.id],
+  }),
+  employee: one(employee, {
+    fields: [user.employeeId],
+    references: [employee.id],
   }),
 }));
 
@@ -112,5 +169,18 @@ export const assetRelations = relations(asset, ({ one }) => ({
   employee: one(employee, {
     fields: [asset.employeeId],
     references: [employee.id],
+  }),
+  // สาม relation ชี้ user คนละคอลัมน์ — ใช้โชว์ชื่อผู้ทำรายการโดยไม่ต้อง join เอง
+  createdByUser: one(user, {
+    fields: [asset.createdBy],
+    references: [user.id],
+  }),
+  updatedByUser: one(user, {
+    fields: [asset.updatedBy],
+    references: [user.id],
+  }),
+  deletedByUser: one(user, {
+    fields: [asset.deletedBy],
+    references: [user.id],
   }),
 }));

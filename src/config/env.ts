@@ -9,8 +9,11 @@ const EnvSchema = t.Object({
   DB_USERNAME: t.String(),
   DB_PASSWORD: t.String(),
   DB_NAME: t.String(),
+  DB_SSL: t.Boolean({ default: false }),
   CORS_ORIGIN: t.String({ default: 'http://localhost:5173' }),
   UPLOAD_DIR: t.String({ default: './uploads' }),
+  JWT_SECRET: t.String({ minLength: 16 }),
+  JWT_EXPIRES_IN: t.String({ default: '8h' }),
 });
 
 // ค่าใน .env เป็น string ล้วน — Convert แปลงเป็นชนิดจริงตาม schema ("3000" -> 3000)

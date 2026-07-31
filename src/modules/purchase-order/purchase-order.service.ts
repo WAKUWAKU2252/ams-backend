@@ -127,7 +127,6 @@ function withLineTotals<
   };
 }
 
-// ดึงพร้อม items + grpoLines เพื่อให้หน้า Create New Asset รู้ว่าแต่ละ line รับของแล้วกี่ชิ้น
 export async function findAll() {
   const rows = await db.query.purchaseOrder.findMany({
     with: {
@@ -181,8 +180,6 @@ interface FindPageParams {
   search?: string;
 }
 
-// list แบบเบา (ไม่มี items/grpoLines) สำหรับหน้า search/autocomplete — ดึงรายละเอียดเต็มทีหลังผ่าน findOneOrFail
-// search แบบ startsWith เท่านั้น (ไม่ใช้ %q%) เพื่อให้ query ใช้ index ได้
 export async function findPage({ page, limit, search }: FindPageParams) {
   const where = search
     ? or(ilike(purchaseOrder.poNumber, `${search}%`), ilike(purchaseOrder.vendorName, `${search}%`))

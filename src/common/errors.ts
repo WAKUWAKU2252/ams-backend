@@ -1,6 +1,3 @@
-// Error ที่ service โยนได้โดยไม่ต้องรู้เรื่อง HTTP
-// error-handler จะแปลง statusCode เป็น response ให้เอง
-
 export class AppError extends Error {
   constructor(
     message: string,
@@ -26,5 +23,19 @@ export class BadRequestError extends AppError {
 export class ConflictError extends AppError {
   constructor(message: string) {
     super(message, 409);
+  }
+}
+
+// 401 — ยังไม่ยืนยันตัวตน (ไม่มี token / token พัง / หมดอายุ)
+export class UnauthorizedError extends AppError {
+  constructor(message = 'ต้องเข้าสู่ระบบก่อน') {
+    super(message, 401);
+  }
+}
+
+// 403 — ยืนยันตัวตนแล้วแต่สิทธิ์ไม่พอ (role ไม่ตรง)
+export class ForbiddenError extends AppError {
+  constructor(message = 'สิทธิ์ไม่พอสำหรับการทำรายการนี้') {
+    super(message, 403);
   }
 }

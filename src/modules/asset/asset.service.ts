@@ -1,19 +1,9 @@
-// ═══ asset.service.ts — สมองของ module ═══
-// กฎเหล็กเดิม: TypeScript ล้วน ห้าม import จาก 'elysia' / ห้าม any / error โยน AppError
-//
-// [วิธีคิดของ create — ลำดับการตรวจคือการเล่าเหตุผลทางธุรกิจ]
-//   Q1 ใบคำขอมีจริงและยังแก้ได้ไหม      (DRAFT เท่านั้น)          → 404 / 400
-//   Q2 รอบรับของที่อ้างเป็นของ PO ใบนี้จริงไหม                    → 400  ★ กันยัดของข้าม PO
-//   Q3 ยังลงได้อีกไหม                   (ไม่เกินที่รับจริง/ที่สั่ง)  → 400
-//   Q4 ข้อมูลอ้างอิงที่เลือกใช้ได้จริงไหม (master ยัง active)      → 400
-//   Q5 รูปที่แนบเป็นรูปจริงและยังว่างไหม                          → 400 / 409
-// ทุก error ต้องบอกสิ่งที่ผู้ใช้ "แก้ได้" ไม่ใช่แค่ว่า invalid
-
-import { and, count, eq, inArray, isNull } from 'drizzle-orm';
+import { and, count, eq, inArray, isNull, max } from 'drizzle-orm';
 import { db } from '../../db';
 import {
   asset,
   assetRequest,
+  assetRequestLine,
   grpoLine,
   attachment,
   category,
@@ -23,18 +13,14 @@ import {
   employee,
 } from '../../db/schema';
 import { NotFoundError, BadRequestError, ConflictError } from '../../common/errors';
+import { declaredMap } from '../asset-request/asset-request-line.service';
 import { createAssetBody, updateAssetBody } from './asset.schema';
+
+// เผื่อเศษจากการหารราคาแบ่งชิ้น (10,000 ÷ 3) — ต่างระดับสตางค์ไม่ถือว่าเกิน
+export const COST_TOLERANCE = 1;
 
 type CreateBody = typeof createAssetBody.static;
 type UpdateBody = typeof updateAssetBody.static;
-
-// ระบบไม่ตัดสินเองว่าอะไรเข้าข่ายสินทรัพย์ — Warehouse ลงทะเบียนได้ทุกรายการที่รับของแล้ว
-// แล้วบัญชีเป็นผู้ตรวจตอนอนุมัติว่ารายการไหนควรขึ้นทะเบียนจริง รายการไหนลงเป็นค่าใช้จ่าย
-// (เกณฑ์ราคาตายตัวตัดสินผิดได้ เช่น ค่าเช่า cloud/license ที่ราคาสูงแต่เป็นค่าใช้จ่าย)
-
-// ── ตัวช่วยที่ใช้ร่วมกันระหว่าง create กับ update ─────────────────────────────
-
-/** master ที่เลือกต้องมีจริงและยัง active — ปิดใช้แล้วห้ามเลือกใหม่ แต่ของเก่าที่ชี้อยู่ไม่กระทบ */
 async function assertMasterUsable(input: {
   categoryId?: number;
   uomId?: number;
@@ -109,8 +95,7 @@ async function assertImageUsable(imageId: string, exceptAssetId?: number) {
 
 // ── create ───────────────────────────────────────────────────────────────────
 
-export async function create(body: CreateBody) {
-  // [Q1] ใบคำขอมีจริงและยังแก้ได้ไหม
+export async function create(body: CreateBody, userId: number) {
   const request = await db.query.assetRequest.findFirst({
     where: and(eq(assetRequest.id, body.requestId), isNull(assetRequest.deletedAt)),
   });
@@ -121,7 +106,6 @@ export async function create(body: CreateBody) {
     );
   }
 
-  // [Q2] รอบรับของที่อ้างเป็นของ PO ใบนี้จริงไหม
   const line = await db.query.grpoLine.findFirst({
     where: eq(grpoLine.id, body.grpoLineId),
     with: { poItem: true, grpo: true },
@@ -134,51 +118,83 @@ export async function create(body: CreateBody) {
     );
   }
 
-  // [Q3] ยังลงได้อีกไหม — สองเพดานคนละความหมาย ต้องเช็คทั้งคู่
-  //   ต่อรอบรับของ: ห้ามเกินที่ "รับมาจริง" ในรอบนั้น (ของยังมาไม่ถึงลงทะเบียนไม่ได้)
+  // [Q3] ยังลงได้อีกไหม — เพดานต่อรอบ: declaredQty ถ้ามีคนแจ้ง / ไม่มีก็ receivedQty ตาม SAP
+  const declared = await db.query.assetRequestLine.findFirst({
+    where: and(
+      eq(assetRequestLine.requestId, body.requestId),
+      eq(assetRequestLine.grpoLineId, body.grpoLineId),
+    ),
+  });
+  const capOfRound = declared ? declared.declaredQty : line.receivedQty;
+
   const [{ value: inThisLine }] = await db
     .select({ value: count() })
     .from(asset)
     .where(and(eq(asset.grpoLineId, body.grpoLineId), isNull(asset.deletedAt)));
-  if (inThisLine >= line.receivedQty) {
+  if (inThisLine >= capOfRound) {
     throw new BadRequestError(
-      `รอบ ${line.grpo.grpoNo} รับ "${line.poItem.itemDescription}" มา ${line.receivedQty} ชิ้น ` +
-        `และลงทะเบียนครบแล้ว — ส่วนที่เหลือต้องรอรอบรับของถัดไป`,
+      declared
+        ? `รอบ ${line.grpo.grpoNo} แจ้งไว้ ${capOfRound} ชิ้น และลงทะเบียนครบแล้ว — ถ้าของมีมากกว่านี้ต้องแก้จำนวนที่แจ้งก่อน`
+        : `รอบ ${line.grpo.grpoNo} รับ "${line.poItem.itemDescription}" มา ${line.receivedQty} ชิ้น ` +
+          `และลงทะเบียนครบแล้ว — ส่วนที่เหลือต้องรอรอบรับของถัดไป`,
     );
   }
 
-  //   ต่อ PO line: ห้ามเกินที่ "สั่ง" ทั้งใบ (กันกรณีรับเกินสั่งแล้วลงทะเบียนตามไปด้วย)
+  //   ต่อ PO line: บล็อกที่จำนวนสั่งเฉพาะบรรทัดที่ "ไม่มีใครแจ้งอะไรเลย" (กันรับเกินสั่งแล้วลงตามไปด้วย)
+  //   บรรทัดที่มีการแจ้ง = หน่วยนับของ PO ใช้กับจำนวนชิ้นไม่ได้อยู่แล้ว (1 งาน = กล้อง 12 ตัว)
+  //   จึงเกินได้ แต่ manager จะเห็นส่วนต่างพร้อมเหตุผลตอนอนุมัติ
   const linesOfItem = await db
     .select({ id: grpoLine.id })
     .from(grpoLine)
     .where(eq(grpoLine.poItemId, line.poItemId));
-  const [{ value: inThisItem }] = await db
+  const idsOfItem = linesOfItem.map((l) => l.id);
+
+  const [{ value: declaredOnItem }] = await db
     .select({ value: count() })
-    .from(asset)
+    .from(assetRequestLine)
     .where(
       and(
-        inArray(
-          asset.grpoLineId,
-          linesOfItem.map((l) => l.id),
-        ),
-        isNull(asset.deletedAt),
+        eq(assetRequestLine.requestId, body.requestId),
+        inArray(assetRequestLine.grpoLineId, idsOfItem),
       ),
     );
-  if (inThisItem >= line.poItem.quantity) {
-    throw new BadRequestError(
-      `"${line.poItem.itemDescription}" สั่งไว้ ${line.poItem.quantity} ชิ้น ลงทะเบียนครบแล้ว`,
-    );
+
+  if (declaredOnItem === 0) {
+    const [{ value: inThisItem }] = await db
+      .select({ value: count() })
+      .from(asset)
+      .where(and(inArray(asset.grpoLineId, idsOfItem), isNull(asset.deletedAt)));
+    if (inThisItem >= line.poItem.quantity) {
+      throw new BadRequestError(
+        `"${line.poItem.itemDescription}" สั่งไว้ ${line.poItem.quantity} ชิ้น ลงทะเบียนครบแล้ว`,
+      );
+    }
   }
 
   // [Q4] [Q5] ข้อมูลอ้างอิงและรูป
   await assertMasterUsable(body);
   if (body.imageId) await assertImageUsable(body.imageId);
 
-  const [row] = await db
-    .insert(asset)
-    .values({
+  // เลขชิ้น: client ส่งเลขช่องที่ตัวเองกรอกมา (ตรงกับที่เห็นบนฟอร์ม) ไม่ส่งมาก็ต่อท้ายให้
+  // ไม่ว่าทางไหน unique uq_asset_po_item_unit_no เป็นคนตัดสินตอนสองคนยิงชนกัน — ไม่ใช่การนับ
+  let unitNo = body.unitNo;
+  if (unitNo === undefined) {
+    const [{ value: maxUnitNo }] = await db
+      .select({ value: max(asset.unitNo) })
+      .from(asset)
+      .where(and(eq(asset.poItemId, line.poItemId), isNull(asset.deletedAt)));
+    unitNo = (maxUnitNo ?? 0) + 1;
+  }
+
+  const [row] = await insertAssetOrConflict({
       requestId: body.requestId,
       grpoLineId: body.grpoLineId,
+      poItemId: line.poItemId,
+      unitNo,
+      // ราคาที่เสนอ — งานเหมาที่แตกเป็นหลายชิ้นต้องกรอกเอง เพราะราคาต่อชิ้นไม่เท่ากัน
+      acquisitionCost: body.acquisitionCost ?? line.poItem.unitPrice,
+      // ชิ้นนี้เกิดเพราะคนแจ้งจำนวนเอง ไม่ได้มาจากตัวเลข SAP — ตรึงไว้ตลอดอายุสินทรัพย์
+      isSplitItem: declared != null,
       description: body.description ?? line.poItem.itemDescription,
       serialNumber: body.serialNumber,
       assetClass: body.assetClass,
@@ -190,12 +206,28 @@ export async function create(body: CreateBody) {
       warrantyStartDate: body.warrantyStartDate,
       warrantyEndDate: body.warrantyEndDate,
       imageId: body.imageId,
-      createdBy: body.createdBy,
-      updatedBy: body.createdBy,
-    })
-    .returning();
+      createdBy: userId,
+      updatedBy: userId,
+  });
 
   return row;
+}
+
+// ชนกันที่ unique (poItemId, unitNo) = มีคนคว้าเลขช่องนั้นไปก่อนเสี้ยววินาที — เป็นเคสปกติ
+// ของการแย่งกัน ไม่ใช่บั๊ก จึงแปลงเป็น 409 ให้ผู้ใช้โหลดใหม่ แทนที่จะโผล่เป็น 500
+async function insertAssetOrConflict(values: typeof asset.$inferInsert) {
+  try {
+    return await db.insert(asset).values(values).returning();
+  } catch (error) {
+    const isUniqueViolation =
+      typeof error === 'object' && error !== null && 'code' in error && error.code === '23505';
+    if (isUniqueViolation) {
+      throw new ConflictError(
+        `ชิ้นที่ ${values.unitNo} ของรายการนี้เพิ่งถูกลงทะเบียนโดยผู้อื่น กรุณาโหลดหน้าใหม่`,
+      );
+    }
+    throw error;
+  }
 }
 
 // ── read ─────────────────────────────────────────────────────────────────────
@@ -246,9 +278,11 @@ export async function findSlotsByRequest(requestId: number) {
   const registered = await db.query.asset.findMany({
     where: and(eq(asset.requestId, requestId), isNull(asset.deletedAt)),
     with: { grpoLine: { with: { grpo: true } } },
-    // id เป็น serial — เรียงตาม id คือเรียงตามลำดับที่ผู้ใช้กรอกเข้ามา
-    orderBy: (a, { asc }) => [asc(a.id)],
+    orderBy: (a, { asc }) => [asc(a.unitNo)],
   });
+
+  // รอบไหนถูกแจ้งจำนวนเองไว้บ้าง — ตัวตัดสินว่าเรนเดอร์กี่ช่อง
+  const declared = await declaredMap(requestId);
 
   return {
     requestId,
@@ -256,9 +290,26 @@ export async function findSlotsByRequest(requestId: number) {
     status: request.status,
     items: request.purchaseOrder.items.map((item) => {
       const received = item.grpoLines.reduce((sum, l) => sum + l.receivedQty, 0);
+      const capOf = (lineId: string, receivedQty: number) =>
+        declared.get(lineId)?.declaredQty ?? receivedQty;
+      const capTotal = item.grpoLines.reduce((sum, l) => sum + capOf(l.id, l.receivedQty), 0);
+      const isDeclared = item.grpoLines.some((l) => declared.has(l.id));
+      const planned = isDeclared ? capTotal : item.quantity;
       const mine = registered.filter((a) => item.grpoLines.some((l) => l.id === a.grpoLineId));
+      const regByLine = new Map<string, number>();
+      for (const a of mine) regByLine.set(a.grpoLineId, (regByLine.get(a.grpoLineId) ?? 0) + 1);
 
-      const slots = Array.from({ length: item.quantity }, (_, i) => {
+      const pendingQueue: { grpoLineId: string; grpoNo: string }[] = [];
+      for (const l of item.grpoLines) {
+        const remain = capOf(l.id, l.receivedQty) - (regByLine.get(l.id) ?? 0);
+        for (let k = 0; k < remain; k++) {
+          pendingQueue.push({ grpoLineId: l.id, grpoNo: l.grpo.grpoNo });
+        }
+      }
+      let pendingPointer = 0;
+      const slotCount = Math.max(planned, mine.length);
+
+      const slots = Array.from({ length: slotCount }, (_, i) => {
         const existing = mine[i];
         if (existing) {
           return {
@@ -266,13 +317,20 @@ export async function findSlotsByRequest(requestId: number) {
             status: 'registered' as const,
             assetId: existing.id,
             serialNumber: existing.serialNumber,
+            grpoLineId: existing.grpoLineId,
             grpoNo: existing.grpoLine.grpo.grpoNo,
           };
         }
-        // ของที่รับมาแล้วแต่ยังไม่ได้ลงทะเบียน = ช่องที่เปิดให้กรอก
-        return i < received
-          ? { index: i + 1, status: 'pending' as const }
-          : { index: i + 1, status: 'noGrpo' as const };
+        const alloc = pendingQueue[pendingPointer++];
+        if (alloc) {
+          return {
+            index: i + 1,
+            status: 'pending' as const,
+            grpoLineId: alloc.grpoLineId,
+            grpoNo: alloc.grpoNo,
+          };
+        }
+        return { index: i + 1, status: 'noGrpo' as const };
       });
 
       return {
@@ -280,15 +338,23 @@ export async function findSlotsByRequest(requestId: number) {
         poLine: item.poLine,
         itemDescription: item.itemDescription,
         unitPrice: item.unitPrice,
+        lineTotal: item.lineTotal,
         ordered: item.quantity,
         received,
         registered: mine.length,
-        // ช่อง pending ต้องรู้ว่าจะผูกกับรอบไหน — เอา line ที่ยังลงไม่เต็มรอบแรกสุด
+        planned,
+        lineAmount: item.lineTotal,
+        registeredCost: mine.reduce((sum, a) => sum + a.acquisitionCost, 0),
+        isDeclared,
+        overQty: planned > item.quantity,
+        overCost: mine.reduce((sum, a) => sum + a.acquisitionCost, 0) >  (item.lineTotal ?? 0) + COST_TOLERANCE,
         grpoLines: item.grpoLines.map((l) => ({
           id: l.id,
           grpoNo: l.grpo.grpoNo,
           grpoDate: l.grpo.grpoDate,
           receivedQty: l.receivedQty,
+          declaredQty: declared.get(l.id)?.declaredQty ?? null,
+          declaredReason: declared.get(l.id)?.reason ?? null,
           registered: registered.filter((a) => a.grpoLineId === l.id).length,
         })),
         slots,
@@ -299,7 +365,7 @@ export async function findSlotsByRequest(requestId: number) {
 
 // ── update / delete ──────────────────────────────────────────────────────────
 
-export async function update(id: number, body: UpdateBody) {
+export async function update(id: number, body: UpdateBody, userId: number) {
   const current = await db.query.asset.findFirst({
     where: and(eq(asset.id, id), isNull(asset.deletedAt)),
     with: { request: true },
@@ -318,17 +384,43 @@ export async function update(id: number, body: UpdateBody) {
   });
   if (body.imageId) await assertImageUsable(body.imageId, id);
 
-  const { updatedBy, ...fields } = body;
+  // ย้ายรอบรับของ: ต้องเป็นรอบของ PO line เดิม (composite FK กันไว้อีกชั้น) และรอบปลายทางต้องยังมีที่ว่าง
+  if (body.grpoLineId && body.grpoLineId !== current.grpoLineId) {
+    const target = await db.query.grpoLine.findFirst({
+      where: eq(grpoLine.id, body.grpoLineId),
+      with: { grpo: true },
+    });
+    if (!target) throw new NotFoundError(`GRPO line ${body.grpoLineId}`);
+    if (target.poItemId !== current.poItemId) {
+      throw new BadRequestError('ย้ายรอบรับของข้ามรายการ PO ไม่ได้ — ต้องเป็นรอบของบรรทัดเดิม');
+    }
+
+    const declaredTarget = await db.query.assetRequestLine.findFirst({
+      where: and(
+        eq(assetRequestLine.requestId, current.requestId),
+        eq(assetRequestLine.grpoLineId, body.grpoLineId),
+      ),
+    });
+    const capOfTarget = declaredTarget ? declaredTarget.declaredQty : target.receivedQty;
+    const [{ value: inTarget }] = await db
+      .select({ value: count() })
+      .from(asset)
+      .where(and(eq(asset.grpoLineId, body.grpoLineId), isNull(asset.deletedAt)));
+    if (inTarget >= capOfTarget) {
+      throw new BadRequestError(`รอบ ${target.grpo.grpoNo} เต็มแล้ว (${capOfTarget} ชิ้น)`);
+    }
+  }
+
   const [row] = await db
     .update(asset)
-    .set({ ...fields, updatedBy, updatedAt: sqlNow() })
+    .set({ ...body, updatedBy: userId, updatedAt: sqlNow() })
     .where(eq(asset.id, id))
     .returning();
 
   return row;
 }
 
-export async function softDelete(id: number, deletedBy: string) {
+export async function softDelete(id: number, userId: number) {
   const current = await db.query.asset.findFirst({
     where: and(eq(asset.id, id), isNull(asset.deletedAt)),
     with: { request: true },
@@ -344,7 +436,7 @@ export async function softDelete(id: number, deletedBy: string) {
   // (แถวนี้ถูก soft delete แล้วแต่ยังชี้ imageId อยู่ ไฟล์จึงยังไม่กำพร้า จนกว่าจะลบจริง)
   const [row] = await db
     .update(asset)
-    .set({ deletedAt: sqlNow(), deletedBy })
+    .set({ deletedAt: sqlNow(), deletedBy: userId, updatedBy: userId, updatedAt: sqlNow() })
     .where(eq(asset.id, id))
     .returning();
 

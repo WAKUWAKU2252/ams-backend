@@ -10,11 +10,16 @@ const pool = new Pool({
   user: env.DB_USERNAME,
   password: env.DB_PASSWORD,
   database: env.DB_NAME,
+  // local (Docker) = false ต่อแบบเดิม / server จริงตั้ง DB_SSL=true
+  ssl: env.DB_SSL ? { rejectUnauthorized: true } : false,
+  // จำกัดเพดาน connection กันเปิดจนเต็ม limit ของ DB ที่ใช้ร่วมกัน
+  max: 10,
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 10_000,
 });
 
 export const db = drizzle(pool, { schema });
 
-// ping ตอน boot เพื่อ fail fast ถ้าต่อ DB ไม่ได้ (แทน DataSource.initialize เดิม)
 export async function connectDb() {
   await pool.query('SELECT 1');
 }

@@ -43,3 +43,6 @@ package-lock.json
 **/*.bun
 
 uploads/
+
+# scratch/debug dumps
+src/common/test.json

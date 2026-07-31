@@ -3,8 +3,10 @@
 import { Elysia } from 'elysia';
 import { uploadBody, attachementIdParams } from './upload.schema';
 import * as uploadService from './upload.service';
+import { authGuard } from '../../plugins/auth';
 
 export const uploadRoutes = new Elysia({ prefix: '/uploads' })
+  .use(authGuard)
   // ไม่ต้อง config parser — Elysia เห็น t.Files ใน schema แล้วสลับเป็น multipart ให้เอง
   .post('/', ({ body }) => uploadService.saveFiles(body.files, body.entityKind), {
     body: uploadBody,

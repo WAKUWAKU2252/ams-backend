@@ -11,6 +11,7 @@ export const purchaseOrder = pgTable('purchase_order', {
   poNumber: varchar({ length: 50 }).primaryKey().notNull(),
   vendorName: varchar({ length: 100 }),
   poDate: date(),
+  requesterName: varchar({ length: 100 }),
   createdAt: isoTimestamp().default(sql`now()`).notNull(),
   updatedAt: isoTimestamp().default(sql`now()`).notNull(),
 });
@@ -22,9 +23,10 @@ export const purchaseOrderItem = pgTable(
     poLine: integer().notNull(),
     itemDescription: varchar().notNull(),
     quantity: integer().notNull(),
-    // mode: 'number' — pg คืน numeric เป็น string ถ้าไม่กำหนด; frontend ต้องใช้เป็นตัวเลข
     unitPrice: numeric({ mode: 'number' }).notNull(),
     poNumber: varchar({ length: 50 }).notNull(),
+    // ยอดรวมจริงต่อบรรทัดจาก SAP (อาจ ≠ quantity × unitPrice เมื่อมีส่วนลด/ค่าขนส่ง) — ใช้เป็นเพดาน over-cost
+    lineTotal: numeric({ mode: 'number' }).notNull(),
   },
   (table) => [
     foreignKey({

@@ -3,7 +3,7 @@
 // เดิม grpoNo/grpoDate ถูกเขียนซ้ำทุกแถวใน grpo_line (8 แถวต่อใบ) จึงบังคับ unique
 // ไม่ได้เลย และไม่มี "ตัวตนของ GRPO หนึ่งใบ" ให้ invoice ผูก — ตารางนี้แก้ทั้งสองเรื่อง
 // ═══════════════════════════════════════════════════════════════════════════
-import { pgTable, serial, varchar, date, uuid, integer, foreignKey, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, serial, varchar, date, uuid, integer, foreignKey, index, uniqueIndex, unique } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { attachment, enumDocType } from './attachment';
 import { purchaseOrderItem } from './purchase';
@@ -62,5 +62,10 @@ export const grpoLine = pgTable(
     index('idx_grpo_line_po_item_id').on(table.poItemId),
     // รอบเดียวกันรับ line เดิมซ้ำสองแถวไม่ได้ — ถ้ารับเพิ่มต้องเป็น GRPO รอบใหม่
     uniqueIndex('uq_grpo_line').on(table.grpoId, table.poItemId),
+    // ไม่ได้กันอะไรเพิ่ม (id เป็น PK อยู่แล้ว) แต่เป็นปลายทางที่จำเป็นให้ asset ทำ
+    // composite FK (grpoLineId, poItemId) ได้ → poItemId ที่ asset copy ลงไปจะโกหกไม่ได้
+    // ต้องเป็น unique() ไม่ใช่ uniqueIndex(): drizzle-kit introspect unique index ที่ขึ้นต้น
+    // ด้วย primary key ไม่ติด แล้วสั่งสร้างซ้ำทุกครั้งจน db:push พังถาวร (เคสจริง: uq_attachment_id_doc_type)
+    unique('uq_grpo_line_id_po_item').on(table.id, table.poItemId),
   ],
 );
