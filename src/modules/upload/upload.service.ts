@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { mkdir, unlink } from 'node:fs/promises';
 import { eq, isNull, and, lt, notExists, sql } from 'drizzle-orm';
 import { db } from '../../db';
-import { attachment, grpo, asset } from '../../db/schema';
+import { attachment, grpoInvoice, asset } from '../../db/schema';
 import { env } from '../../config/env';
 import { BadRequestError, NotFoundError } from '../../common/errors';
 
@@ -110,7 +110,7 @@ export async function cleanupOrphans(): Promise<number> {
       and(
         lt(attachment.createdAt, cutoff),
         notExists(
-          db.select({ n: sql`1` }).from(grpo).where(eq(grpo.invoiceId, attachment.id)),
+          db.select({ n: sql`1` }).from(grpoInvoice).where(eq(grpoInvoice.attachmentId, attachment.id)),
         ),
         notExists(
           db.select({ n: sql`1` }).from(asset).where(eq(asset.imageId, attachment.id)),

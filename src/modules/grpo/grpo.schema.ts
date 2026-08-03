@@ -14,3 +14,9 @@ export const grpoListQuery = t.Object({
 export const linkInvoiceBody = t.Object({
   attachmentId: t.String({ format: 'uuid' }),
 });
+
+// ถอด invoice ต้องระบุใบไหน — 1 รอบแนบได้หลายใบ (attachmentId อยู่ใน path)
+export const unlinkInvoiceParams = t.Object({
+  id: t.Numeric(),
+  attachmentId: t.String({ format: 'uuid' }),
+});

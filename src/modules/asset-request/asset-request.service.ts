@@ -3,9 +3,7 @@ import { db } from '../../db';
 import {
   asset,
   assetRequest,
-  assetRequestLine,
   assetRequestOpener,
-  grpoLine,
   purchaseOrder,
   purchaseOrderItem,
   user,
@@ -172,8 +170,8 @@ async function assertSubmittable(requestId: number, poNumber: string) {
     );
   }
 
-  // ยอดเงินต่อบรรทัดเกินที่ PO ระบุ = ยอมได้ (ค่าติดตั้ง/ขนส่งที่รวมเป็นทุน) แต่ต้องมีคนอธิบายไว้
-  // ที่ใดที่หนึ่งของบรรทัดนั้น มิฉะนั้น manager จะเห็นแค่ตัวเลขเกินโดยไม่รู้เหตุผล
+  // ยอดเงินรวมต่อบรรทัดห้ามเกินยอดใน PO เด็ดขาด — ทั้งบรรทัด (รวมงานเหมาที่แตกชิ้นเอง) แชร์งบ
+  // ก้อนเดียวคือ lineTotal ถ้าเกินแปลว่ากระจายราคาผิด ต้องแก้ก่อนส่ง ไม่ใช่แค่หาเหตุผลมาอธิบาย
   const items = await db
     .select({
       id: purchaseOrderItem.id,
@@ -184,25 +182,15 @@ async function assertSubmittable(requestId: number, poNumber: string) {
     .from(purchaseOrderItem)
     .where(eq(purchaseOrderItem.poNumber, poNumber));
 
-  const declaredItemIds = new Set(
-    (
-      await db
-        .select({ poItemId: grpoLine.poItemId })
-        .from(assetRequestLine)
-        .innerJoin(grpoLine, eq(grpoLine.id, assetRequestLine.grpoLineId))
-        .where(eq(assetRequestLine.requestId, requestId))
-    ).map((r) => r.poItemId),
-  );
-
   for (const item of items) {
     const sum = rows
       .filter((r) => r.poItemId === item.id)
       .reduce((total, r) => total + r.acquisitionCost, 0);
-    const lineAmount = item.lineTotal?? 0;
-    if (sum > lineAmount + COST_TOLERANCE && !declaredItemIds.has(item.id)) {
+    const lineAmount = item.lineTotal ?? 0;
+    if (sum > lineAmount + COST_TOLERANCE) {
       throw new ConflictError(
         `"${item.description}" กรอกราคารวม ${sum.toLocaleString()} เกินยอดใน PO (${lineAmount.toLocaleString()}) ` +
-          `— ต้องระบุเหตุผลที่รอบรับของของรายการนี้ก่อนส่ง`,
+          `— ลดราคารวมให้ไม่เกินยอด PO ก่อนส่ง`,
       );
     }
   }

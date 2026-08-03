@@ -12,7 +12,7 @@
 import { relations } from 'drizzle-orm';
 import { purchaseOrder, purchaseOrderItem } from './purchase';
 import { attachment } from './attachment';
-import { grpo, grpoLine } from './grpo';
+import { grpo, grpoLine, grpoInvoice } from './grpo';
 import { assetRequest } from './asset-request';
 import { assetRequestOpener } from './asset-request-opener';
 import { assetRequestLine } from './asset-request-line';
@@ -33,10 +33,19 @@ export const purchaseOrderItemRelations = relations(purchaseOrderItem, ({ one, m
   grpoLines: many(grpoLine),
 }));
 
-export const grpoRelations = relations(grpo, ({ one, many }) => ({
+export const grpoRelations = relations(grpo, ({ many }) => ({
   lines: many(grpoLine),
-  invoice: one(attachment, {
-    fields: [grpo.invoiceId],
+  // invoice ของรอบ — many-to-many ผ่าน grpo_invoice (1 รอบหลายใบ / 1 ใบหลายรอบ)
+  invoices: many(grpoInvoice),
+}));
+
+export const grpoInvoiceRelations = relations(grpoInvoice, ({ one }) => ({
+  grpo: one(grpo, {
+    fields: [grpoInvoice.grpoId],
+    references: [grpo.id],
+  }),
+  attachment: one(attachment, {
+    fields: [grpoInvoice.attachmentId],
     references: [attachment.id],
   }),
 }));

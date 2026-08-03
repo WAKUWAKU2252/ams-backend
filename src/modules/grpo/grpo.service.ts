@@ -1,7 +1,7 @@
 // logic ของรอบรับของ (GRPO) — TypeScript ล้วน ไม่ import จาก elysia
 import { eq, inArray, isNull, and } from 'drizzle-orm';
 import { db } from '../../db';
-import { grpo, grpoLine, purchaseOrderItem, attachment } from '../../db/schema';
+import { grpo, grpoLine, grpoInvoice, purchaseOrderItem, attachment } from '../../db/schema';
 import { BadRequestError, NotFoundError } from '../../common/errors';
 
 export async function findOneOrFail(id: number) {
@@ -9,7 +9,7 @@ export async function findOneOrFail(id: number) {
     where: eq(grpo.id, id),
     with: {
       lines: { with: { poItem: true } },
-      invoice: true,
+      invoices: { with: { attachment: true } },
     },
   });
   if (!row) throw new NotFoundError(`GRPO ${id}`);
@@ -29,15 +29,14 @@ export async function findByPo(poNumber: string) {
     where: inArray(grpo.id, grpoIds),
     with: {
       lines: { with: { poItem: true } },
-      invoice: true,
+      invoices: { with: { attachment: true } },
     },
     orderBy: (g, { asc }) => [asc(g.grpoDate), asc(g.id)],
   });
 }
 
-// ผูกไฟล์ที่อัปโหลดไว้แล้วเข้ากับรอบรับของ
-// ตั้งใจให้ผูกทีละรอบ: invoice ใบเดียวครอบหลาย GRPO ได้ (invoiceId ไม่ unique)
-// frontend ที่เจอเคสนั้นก็เรียกซ้ำทีละ id — ตรงไปตรงมากว่ารับ array แล้วต้องจัดการสำเร็จบางส่วน
+// แนบไฟล์ที่อัปโหลดไว้แล้วเข้ากับรอบรับของ (1 รอบมีได้หลายใบ / 1 ใบครอบหลายรอบ)
+// แนบใบเดิมซ้ำรอบเดิม = no-op (PK กันซ้ำ) ไม่ถือเป็น error
 export async function linkInvoice(id: number, attachmentId: string) {
   const target = await db.query.grpo.findFirst({ where: eq(grpo.id, id) });
   if (!target) throw new NotFoundError(`GRPO ${id}`);
@@ -53,31 +52,21 @@ export async function linkInvoice(id: number, attachmentId: string) {
     throw new BadRequestError('ไฟล์นี้ไม่ใช่ invoice — แนบได้เฉพาะไฟล์ที่อัปโหลดเป็น INVOICE');
   }
 
-  const [row] = await db
-    .update(grpo)
-    .set({ invoiceId: attachmentId })
-    .where(eq(grpo.id, id))
-    .returning();
-
-  return row;
+  await db.insert(grpoInvoice).values({ grpoId: id, attachmentId }).onConflictDoNothing();
+  return { success: true };
 }
 
-export async function unlinkInvoice(id: number) {
-  const target = await db.query.grpo.findFirst({ where: eq(grpo.id, id) });
-  if (!target) throw new NotFoundError(`GRPO ${id}`);
-
-  // ถอดของที่ไม่มีอยู่ = ผู้ใช้เข้าใจสถานะผิด ควรบอกไม่ใช่เงียบ ๆ ว่าสำเร็จ
-  if (!target.invoiceId) {
-    throw new BadRequestError(`GRPO ${target.grpoNo} ยังไม่มี invoice แนบอยู่`);
-  }
-
+export async function unlinkInvoice(id: number, attachmentId: string) {
   // ไม่ลบแถว attachment ทิ้งที่นี่ — ไฟล์อาจถูก GRPO รอบอื่นใช้ร่วมอยู่
   // (invoice ใบเดียวครอบหลายรอบได้) ปล่อยให้ cleanupOrphans ตัดสินใจว่ากำพร้าจริงไหม
-  const [row] = await db
-    .update(grpo)
-    .set({ invoiceId: null })
-    .where(eq(grpo.id, id))
+  const deleted = await db
+    .delete(grpoInvoice)
+    .where(and(eq(grpoInvoice.grpoId, id), eq(grpoInvoice.attachmentId, attachmentId)))
     .returning();
 
-  return row;
+  // ถอดของที่ไม่มีอยู่ = ผู้ใช้เข้าใจสถานะผิด ควรบอกไม่ใช่เงียบ ๆ ว่าสำเร็จ
+  if (deleted.length === 0) {
+    throw new NotFoundError(`invoice ${attachmentId} ในรอบ GRPO ${id}`);
+  }
+  return { success: true };
 }

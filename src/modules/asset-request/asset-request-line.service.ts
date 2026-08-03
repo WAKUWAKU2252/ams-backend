@@ -83,6 +83,18 @@ export async function declareLine(
     );
   }
 
+  // แจ้งจำนวน "เท่ากับที่ SAP รับมาเป๊ะ" = ไม่ได้แตกรายการ (จำนวนช่องเท่าเดิม) → ถือว่าไม่แจ้ง
+  // ลบการแจ้งที่อาจค้างอยู่ทิ้ง กัน badge "แจ้งเอง/แตกรายการเอง" ขึ้นทั้งที่จำนวนไม่ต่างจาก SAP
+  // (registered > receivedQty โดนด่านข้างบนดักไปแล้ว เพราะ declaredQty = receivedQty < registered)
+  if (declaredQty === line.receivedQty) {
+    const deleted = await db
+      .delete(assetRequestLine)
+      .where(and(eq(assetRequestLine.requestId, requestId), eq(assetRequestLine.grpoLineId, grpoLineId)))
+      .returning();
+    if (deleted.length > 0) await touchRequest(requestId); // แตะ updatedAt เฉพาะตอนมีการเปลี่ยนจริง
+    return deleted[0] ?? null;
+  }
+
   const [row] = await db
     .insert(assetRequestLine)
     .values({ requestId, grpoLineId, declaredQty, reason, createdBy: userId, updatedBy: userId })

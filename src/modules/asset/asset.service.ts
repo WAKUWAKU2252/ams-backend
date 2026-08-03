@@ -191,8 +191,11 @@ export async function create(body: CreateBody, userId: number) {
       grpoLineId: body.grpoLineId,
       poItemId: line.poItemId,
       unitNo,
-      // ราคาที่เสนอ — งานเหมาที่แตกเป็นหลายชิ้นต้องกรอกเอง เพราะราคาต่อชิ้นไม่เท่ากัน
-      acquisitionCost: body.acquisitionCost ?? line.poItem.unitPrice,
+      // ราคาที่เสนอ — ชิ้นที่ n เกินจำนวนที่ GRPO รับมา = ชิ้นที่ "แตกเพิ่มเอง" (งานเหมา)
+      // ทั้งบรรทัดแชร์งบก้อนเดียว (lineTotal) จะ default เป็น unitPrice ทุกชิ้นไม่ได้ ยอดรวมจะทะลุ
+      // ชิ้นที่เกินจึงเริ่มที่ 0 ให้ผู้ใช้กระจายราคาจริงเอง / ชิ้นตาม SAP คงใช้ unitPrice ตามเดิม
+      acquisitionCost:
+        body.acquisitionCost ?? (inThisLine >= line.receivedQty ? 0 : line.poItem.unitPrice),
       // ชิ้นนี้เกิดเพราะคนแจ้งจำนวนเอง ไม่ได้มาจากตัวเลข SAP — ตรึงไว้ตลอดอายุสินทรัพย์
       isSplitItem: declared != null,
       description: body.description ?? line.poItem.itemDescription,
@@ -267,7 +270,12 @@ export async function findSlotsByRequest(requestId: number) {
         with: {
           items: {
             orderBy: (item, { asc }) => [asc(item.poLine)],
-            with: { grpoLines: { with: { grpo: true }, orderBy: (l, { asc }) => [asc(l.grpoId)] } },
+            with: {
+              grpoLines: {
+                with: { grpo: { with: { invoices: { with: { attachment: true } } } } },
+                orderBy: (l, { asc }) => [asc(l.grpoId)],
+              },
+            },
           },
         },
       },
@@ -317,6 +325,9 @@ export async function findSlotsByRequest(requestId: number) {
             status: 'registered' as const,
             assetId: existing.id,
             serialNumber: existing.serialNumber,
+            acquisitionCost: existing.acquisitionCost, // ราคาจริงต่อชิ้น (ชิ้นเกิน = 0 ตาม default)
+            // lifecycle จริงของชิ้น: DRAFT = ยังไม่เข้า SAP (badge "requested") / REGISTERED = ลง SAP แล้ว
+            lifecycle: existing.lifecycle,
             grpoLineId: existing.grpoLineId,
             grpoNo: existing.grpoLine.grpo.grpoNo,
           };
@@ -350,12 +361,20 @@ export async function findSlotsByRequest(requestId: number) {
         overCost: mine.reduce((sum, a) => sum + a.acquisitionCost, 0) >  (item.lineTotal ?? 0) + COST_TOLERANCE,
         grpoLines: item.grpoLines.map((l) => ({
           id: l.id,
+          grpoId: l.grpoId, // integer — ใช้เรียก PATCH/DELETE /grpo/:id/invoice
           grpoNo: l.grpo.grpoNo,
           grpoDate: l.grpo.grpoDate,
           receivedQty: l.receivedQty,
           declaredQty: declared.get(l.id)?.declaredQty ?? null,
           declaredReason: declared.get(l.id)?.reason ?? null,
           registered: registered.filter((a) => a.grpoLineId === l.id).length,
+          // invoice ทั้งหมดที่แนบกับรอบนี้ (1 รอบมีได้หลายใบ) — frontend ใช้เรนเดอร์รายการ/ปุ่ม
+          invoices: l.grpo.invoices.map((gi) => ({
+            id: gi.attachment.id,
+            originalName: gi.attachment.originalName,
+            mimeType: gi.attachment.mimeType,
+            size: gi.attachment.size,
+          })),
         })),
         slots,
       };
