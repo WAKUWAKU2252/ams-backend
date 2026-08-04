@@ -34,6 +34,10 @@ export const user = pgTable(
     username: varchar({ length: 100 }).notNull(),
     email: varchar({ length: 100 }),
     displayName: varchar({ length: 100 }).notNull(),
+    // แยกชื่อ-นามสกุลออกจาก displayName — nullable เพราะบาง account (service account) หรือข้อมูลเดิม
+    // ยังไม่มีค่าแยก และ displayName ยังเป็นชื่อหลักที่โชว์บน UI อยู่
+    firstName: varchar({ length: 100 }),
+    lastName: varchar({ length: 100 }),
     // เก็บเฉพาะ hash (argon2id จาก Bun.password) ไม่เคยเก็บ plaintext / ห้าม return ออก API
     // nullable — รองรับ user ที่ยืนยันผ่าน AD ในอนาคต (ฝั่งเราไม่มี hash)
     passwordHash: varchar({ length: 255 }),

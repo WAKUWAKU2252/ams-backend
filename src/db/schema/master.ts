@@ -10,7 +10,7 @@
 //   - createdAt/updatedAt ครบทุกตาราง — ข้อมูลอ้างอิงเปลี่ยนแล้วต้องสาวกลับได้ว่า
 //     เปลี่ยนเมื่อไหร่ (วัตถุประสงค์ข้อ 4 ของโปรเจกต์: รองรับการตรวจสอบภายใน)
 // ═══════════════════════════════════════════════════════════════════════════
-import { pgTable, serial, varchar, integer, boolean, foreignKey, index, unique } from 'drizzle-orm/pg-core';
+import { pgTable, serial, varchar, integer, boolean, foreignKey, index, unique, type AnyPgColumn } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { isoTimestamp } from './_shared';
 
@@ -46,11 +46,21 @@ export const department = pgTable(
     shortName: varchar({ length: 20 }),
     // ศูนย์ต้นทุนซ้ำ = ค่าใช้จ่ายไปผูกผิดแผนก แก้ย้อนหลังยากเพราะงบถูกปิดงวดไปแล้ว
     costCenter: varchar({ length: 100 }),
+    // หัวหน้าแผนก (ผู้อนุมัติคำขอลงทะเบียนของแผนกนี้) — ชี้ employee ไม่ใช่ user เพื่อเลี่ยง
+    // circular import master<->user; ตอนอนุมัติ resolve เป็น user ผ่าน user.employeeId (role MANAGER)
+    // ใช้ .references แบบ lazy เพราะ employee ถูกนิยามทีหลังในไฟล์เดียวกัน (mutual FK) — table-level อ้าง employee.id ไม่ได้ตอน eval
+    // annotate return เป็น AnyPgColumn เพื่อตัด circular type: department↔employee อ้างกันไป-กลับ ถ้าไม่ตัด TS ไล่ type วนไม่จบ
+    // แล้วยอมให้ทั้งสองตารางเป็น any ทำให้ db.query...with ทั้งระบบพังตาม (TS7022)
+    managerId: integer().references((): AnyPgColumn => employee.id),
     isActive: boolean().default(true).notNull(),
     createdAt: isoTimestamp().default(sql`now()`).notNull(),
     updatedAt: isoTimestamp().default(sql`now()`).notNull(),
   },
-  (table) => [unique('uq_department_cost_center').on(table.costCenter)],
+  (table) => [
+    unique('uq_department_cost_center').on(table.costCenter),
+    // pg ไม่สร้าง index ให้ฝั่ง FK เอง — ใช้ตอนหาแผนกที่ user คนนี้เป็นหัวหน้า
+    index('idx_department_manager_id').on(table.managerId),
+  ],
 );
 
 export const assetLocation = pgTable('asset_location', {

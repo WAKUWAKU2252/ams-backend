@@ -20,9 +20,14 @@ import { category, uom, department, assetLocation, assetSubLocation, employee } 
 import { role, user } from './user';
 import { asset } from './asset';
 
-export const purchaseOrderRelations = relations(purchaseOrder, ({ many }) => ({
+export const purchaseOrderRelations = relations(purchaseOrder, ({ one, many }) => ({
   items: many(purchaseOrderItem),
   assetRequests: many(assetRequest),
+  // ผู้ขอซื้อ (พนักงาน) — ใช้ resolve แผนก/หัวหน้าเพื่อ route คำขออนุมัติ
+  requester: one(employee, {
+    fields: [purchaseOrder.requesterEmpId],
+    references: [employee.id],
+  }),
 }));
 
 export const purchaseOrderItemRelations = relations(purchaseOrderItem, ({ one, many }) => ({
@@ -75,6 +80,11 @@ export const assetRequestRelations = relations(assetRequest, ({ one, many }) => 
   lines: many(assetRequestLine),
   createdByUser: one(user, {
     fields: [assetRequest.createdBy],
+    references: [user.id],
+  }),
+  // manager ที่คำขอนี้ถูก route ไปหา (หัวหน้าแผนกของผู้เปิด PO) — snapshot ตอน submit
+  assignedManager: one(user, {
+    fields: [assetRequest.assignedManagerId],
     references: [user.id],
   }),
 }));

@@ -40,6 +40,10 @@ export const assetRequest = pgTable(
     // FK -> user.id: ใครเปิดใบนี้คนแรก (audit) — อ่านจาก token เท่านั้น ห้ามรับจาก body
     createdBy: integer().notNull(),
 
+    // FK -> user.id: manager ที่คำขอนี้ถูก route ไปหา (snapshot ตอน submit) = หัวหน้าแผนกของผู้เปิด PO
+    // ไว้ audit/escalation และให้ callback ตอนกดอนุมัติเทียบว่าคนกดตรงกับผู้ที่ตั้งใจส่งไปหา; nullable ตอน DRAFT
+    assignedManagerId: integer(),
+
     // lock กันแก้พร้อมกันย้ายไป in-memory (presence registry) แล้ว — ไม่เก็บที่ DB อีก
     createdAt: isoTimestamp().default(sql`now()`).notNull(),
     // ตัวตัดสิน "draft ร้าง" ของ cleanup job อนาคต + optimistic check กัน lost update ตอน save
@@ -77,8 +81,14 @@ export const assetRequest = pgTable(
       foreignColumns: [user.id],
       name: 'fk_asset_request_deleted_by',
     }),
+    foreignKey({
+      columns: [table.assignedManagerId],
+      foreignColumns: [user.id],
+      name: 'fk_asset_request_assigned_manager',
+    }),
     // pg ไม่สร้าง index ให้ฝั่ง FK เอง — ใช้ตอน join/เช็ค draft ของ PO
     index('idx_asset_request_po_number').on(table.poNumber),
+    index('idx_asset_request_assigned_manager_id').on(table.assignedManagerId),
     index('idx_asset_request_created_by').on(table.createdBy),
     index('idx_asset_request_approved_by').on(table.approvedBy),
     index('idx_asset_request_rejected_by').on(table.rejectedBy),
