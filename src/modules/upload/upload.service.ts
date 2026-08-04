@@ -24,7 +24,7 @@ type DocType = keyof typeof RULES;
 
 await mkdir(env.UPLOAD_DIR, { recursive: true });
 
-export async function saveFiles(files: File[], docType: DocType) {
+export async function saveFiles(files: File[], docType: DocType, uploadedBy: number) {
   const rule = RULES[docType];
 
   // validate ทั้งชุดก่อนเริ่มเขียน disk — กันสภาพเซฟไปครึ่งเดียวแล้วพัง
@@ -54,6 +54,7 @@ export async function saveFiles(files: File[], docType: DocType) {
         storedName,
         mimeType: file.type,
         size: file.size,
+        uploadedBy,
       })
       .returning();
 
@@ -84,10 +85,10 @@ export async function getFileOrFail(id: string) {
 
 // ตั้งใจไม่ลบไฟล์บน disk: row หายก่อนไฟล์ = ขยะที่กวาดทีหลังได้
 // แต่ไฟล์หายก่อน row = ทะเบียนชี้ไฟล์ผี (พังถาวร) — เลือกทางที่ซ่อมได้
-export async function softDelete(id: string) {
+export async function softDelete(id: string, deletedBy: number) {
   const [row] = await db
     .update(attachment)
-    .set({ deletedAt: sql`now()` })
+    .set({ deletedAt: sql`now()`, deletedBy, updatedAt: sql`now()` })
     // ต้องมี isNull(deletedAt) — ลบซ้ำรอบสองต้องได้ 404 ไม่ใช่สำเร็จเงียบ ๆ
     .where(and(eq(attachment.id, id), isNull(attachment.deletedAt)))
     .returning();

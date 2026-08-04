@@ -11,15 +11,13 @@ const app = createApp().listen(env.PORT);
 console.log(`🦊 AMS API running at http://localhost:${env.PORT}`);
 console.log(`📖 Swagger UI: http://localhost:${env.PORT}/swagger`);
 
-// รอบกวาดไฟล์กำพร้า — อยู่ที่ไฟล์นี้เพราะเป็น runtime entry ที่เดียวของแอป
-// (app.ts ถูก import ใน test ห้ามมี side effect อย่าง setInterval แอบรัน)
 const runCleanup = () =>
   cleanupOrphans()
     .then((n) => {
-      if (n > 0) console.log(`🧹 กวาดไฟล์กำพร้า ${n} รายการ`);
+      if (n > 0) console.log(`🧹 deleted files with no relation: ${n} file`);
     })
-    .catch(console.error); // ห้ามปล่อย rejection หลุดจนพา process ตาย
+    .catch(console.error); 
 
-runCleanup(); // รอบแรกทันทีตอน boot — เก็บของค้างช่วง server ปิด
-setInterval(runCleanup, 60 * 60 * 1000); // แล้วชั่วโมงละครั้ง (ขยะเน่าช้า ไม่ต้องถี่)
+runCleanup();
+setInterval(runCleanup, 60 * 60 * 1000); 
 

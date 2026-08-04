@@ -71,7 +71,10 @@ export const assetLocation = pgTable('asset_location', {
   isActive: boolean().default(true).notNull(),
   createdAt: isoTimestamp().default(sql`now()`).notNull(),
   updatedAt: isoTimestamp().default(sql`now()`).notNull(),
-});
+}, (table) => [
+  // ชื่อสถานที่ต้อง unique ตามกฎหัวไฟล์ (ชื่อที่ผู้ใช้เห็นห้ามซ้ำ) — ซ้ำแล้ว dropdown เลือกคนละ id รายงานแตกก้อน
+  unique('uq_asset_location_name').on(table.name),
+]);
 
 export const assetSubLocation = pgTable(
   'asset_sub_location',
@@ -95,6 +98,10 @@ export const assetSubLocation = pgTable(
     index('idx_asset_sub_location_location_id').on(table.locationId),
     // กันสร้างจุดเดิมซ้ำ (อาคารเดียวกัน ชั้น 2 ห้อง 201 ถูกเพิ่มสองครั้ง) ซึ่งจะทำให้
     // asset สองชิ้นอยู่ห้องเดียวกันจริงแต่ชี้คนละ id — รายงานตามสถานที่จะแตกเป็นสองก้อน
+    // schema ตรงนี้เป็น plain unique เพราะ drizzle-kit push introspect NULLS NOT DISTINCT ไม่เห็น
+    // (ถ้าใส่ .nullsNotDistinct() push จะ re-add ไม่จบ) — ตัวจริงที่รันบน server มี NULLS NOT DISTINCT
+    // เติมมือไว้ใน migration 0000_init.sql แล้ว (Finding #4): floor/room NULL ได้ ถ้าไม่ใส่ NULLS NOT
+    // DISTINCT pg จะยอม (loc,NULL,NULL) ซ้ำได้ไม่จำกัด → dev (push) ยังเป็น plain แต่ deploy ถูกต้อง
     unique('uq_asset_sub_location').on(table.locationId, table.floor, table.room),
   ],
 );

@@ -3,6 +3,7 @@ import { t } from 'elysia';
 
 export const createUserBody = t.Object({
   username: t.String({ minLength: 1, maxLength: 100 }),
+  // ส่งมาตอนสร้าง = email หลัก (PRIMARY) ลงตาราง user_email; ไม่ส่งก็สร้าง user เปล่าได้
   email: t.Optional(t.String({ format: 'email', maxLength: 100 })),
   displayName: t.String({ minLength: 1, maxLength: 100 }),
   // แยกชื่อ-นามสกุล (nullable ใน DB) — ส่งมาก็เก็บ ไม่ส่งก็เป็น null

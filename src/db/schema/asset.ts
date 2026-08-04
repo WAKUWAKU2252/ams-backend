@@ -6,6 +6,7 @@ import {
   uuid,
   integer,
   numeric,
+  date,
   boolean,
   foreignKey,
   index,
@@ -44,6 +45,15 @@ export const asset = pgTable(
     // ราคาทุนที่ "เสนอ" ตอนขอลงทะเบียน ค่าตั้งต้นจาก purchase_order_item.unitPrice
     // ตรึงไว้ ณ ตอนสร้าง — ราคาที่ลงบัญชีจริงเป็นของ SAP ซึ่งจะ sync มาทีหลังคนละคอลัมน์
     acquisitionCost: numeric({ mode: 'number' }).notNull(),
+    // ── มูลค่าทางบัญชี/ค่าเสื่อม: เก็บที่ AMS เอง (snapshot จาก SAP) เผื่อ SAP ล่มยังดูข้อมูลได้
+    //    ตอบวัตถุประสงค์ข้อ 3 (หน่วยงานดูมูลค่าคงเหลือเองได้). accumulatedDepreciation/netBookValue
+    //    เปลี่ยนทุกงวดบัญชี → ต้องมี job pull จาก SAP มา sync เป็นระยะ (ค่าจะ stale ระหว่างรอบ)
+    //    ทุกตัว nullable: NULL = ยังไม่ได้ sync จาก SAP (ชัดกว่า default 0 ที่อาจโกหกว่าไม่มีค่าเสื่อม)
+    acquisitionDate: date(),
+    usefulLifeYear: integer(),
+    salvageValue: numeric({ mode: 'number' }),
+    accumulatedDepreciation: numeric({ mode: 'number' }),
+    netBookValue: numeric({ mode: 'number' }),
     // ชิ้นนี้เกิดจากการที่คนแจ้งจำนวนเอง ไม่ได้มาจากตัวเลข SAP ตรง ๆ
     // เป็น snapshot ณ ตอนเกิด (derive จาก asset_request_line ย้อนหลังไม่ได้ เพราะชิ้นแรก
     // ของงานเหมาก็ไม่เกิน quantity เหมือนกัน) ต้องติดตัวไปถึง Dashboard/Audit/บัญชี
@@ -55,7 +65,7 @@ export const asset = pgTable(
     assetClass: varchar({ length: 50 }),
     qrCode: varchar({ length: 255 }),
     lifecycle: enumAssetLifecycle().default('DRAFT').notNull(),
-    status: enumAssetStatus().default('Active'),
+    status: enumAssetStatus().default('Active').notNull(),
     uomId: integer().notNull(),
     employeeId: integer(),
     locationId: integer().notNull(),
@@ -148,7 +158,8 @@ export const asset = pgTable(
     index('idx_asset_updated_by').on(table.updatedBy),
     index('idx_asset_deleted_by').on(table.deletedBy),
     // เลข SAP ต้องไม่ซ้ำ — pg ยอมหลาย NULL อยู่แล้ว (ช่วง DRAFT ยังไม่มีเลข)
-    uniqueIndex('uq_asset_number').on(table.assetNumber),
+    // partial WHERE deletedAt IS NULL: asset ที่ลบแล้วต้องคืนเลข SAP ให้ใช้ซ้ำได้ (ในบัญชีเลขนั้นว่างแล้ว)
+    uniqueIndex('uq_asset_number').on(table.assetNumber).where(sql`${table.deletedAt} IS NULL`),
     // ใช้ตอนนับ/กรองรายชิ้นต่อ PO line โดยไม่ต้อง join grpo_line ก่อนทุกครั้ง
     index('idx_asset_po_item_id').on(table.poItemId),
     // ★ หัวใจของการคุมจำนวน: เลขชิ้นห้ามซ้ำในบรรทัดเดียวกัน
@@ -160,5 +171,8 @@ export const asset = pgTable(
     // 1 ไฟล์รูป = 1 ชิ้น ห้ามใช้ร่วม — เปลี่ยนรูปต้องอัปไฟล์ใหม่แล้วสลับ imageId
     // (ห้ามเขียนทับไฟล์เดิมบน disk: browser cache ค้าง + ทำลายหลักฐานรูปตอนรับของ)
     uniqueIndex('uq_asset_image').on(table.imageId),
+    // qrCode ห้ามซ้ำในชิ้นที่ยังใช้งาน — สแกนตอน Audit จะได้ไม่ชี้ผิดชิ้นแล้วบันทึกสถานะ/สถานที่ผิด
+    // partial: ชิ้นที่ soft delete แล้วต้องคืน code ให้ชิ้นใหม่ใช้ต่อได้ (เหมือน uq_asset_number/unit_no)
+    uniqueIndex('uq_asset_qr_code').on(table.qrCode).where(sql`${table.deletedAt} IS NULL`),
   ],
 );

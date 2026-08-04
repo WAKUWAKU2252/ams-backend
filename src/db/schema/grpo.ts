@@ -15,6 +15,9 @@ export const grpo = pgTable(
     id: serial().primaryKey().notNull(),
     grpoNo: varchar({ length: 50 }).notNull(),
     grpoDate: date().notNull(),
+    // ข้อมูล SAP sync — timestamp ให้สาวได้ว่าแถวเข้า/แก้เมื่อไหร่ (Finding #11)
+    createdAt: isoTimestamp().default(sql`now()`).notNull(),
+    updatedAt: isoTimestamp().default(sql`now()`).notNull(),
     // invoice ย้ายไปตาราง grpo_invoice แล้ว (many-to-many) — เดิม invoiceId เป็นคอลัมน์เดียว
   },
   (table) => [
@@ -34,6 +37,9 @@ export const grpoLine = pgTable(
     // จำนวนที่ "รับจริง" ในรอบนี้ — คนละตัวกับ purchase_order_item.quantity (จำนวนสั่ง)
     // ของมาไม่ครบ/ทยอยมา สองค่านี้จะต่างกันเสมอ และค่านี้คือเส้นแบ่งว่าชิ้นไหนเปิดให้กรอก
     receivedQty: integer().notNull(),
+    // ข้อมูล SAP sync — timestamp ให้สาวได้ว่าแถวเข้า/แก้เมื่อไหร่ (Finding #11)
+    createdAt: isoTimestamp().default(sql`now()`).notNull(),
+    updatedAt: isoTimestamp().default(sql`now()`).notNull(),
   },
   (table) => [
     foreignKey({

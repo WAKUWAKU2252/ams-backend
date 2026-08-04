@@ -17,7 +17,7 @@ import { assetRequest } from './asset-request';
 import { assetRequestOpener } from './asset-request-opener';
 import { assetRequestLine } from './asset-request-line';
 import { category, uom, department, assetLocation, assetSubLocation, employee } from './master';
-import { role, user } from './user';
+import { role, user, userEmail } from './user';
 import { asset } from './asset';
 
 export const purchaseOrderRelations = relations(purchaseOrder, ({ one, many }) => ({
@@ -134,7 +134,7 @@ export const roleRelations = relations(role, ({ many }) => ({
   users: many(user),
 }));
 
-export const userRelations = relations(user, ({ one }) => ({
+export const userRelations = relations(user, ({ one, many }) => ({
   role: one(role, {
     fields: [user.roleId],
     references: [role.id],
@@ -142,6 +142,14 @@ export const userRelations = relations(user, ({ one }) => ({
   employee: one(employee, {
     fields: [user.employeeId],
     references: [employee.id],
+  }),
+  emails: many(userEmail),
+}));
+
+export const userEmailRelations = relations(userEmail, ({ one }) => ({
+  user: one(user, {
+    fields: [userEmail.userId],
+    references: [user.id],
   }),
 }));
 

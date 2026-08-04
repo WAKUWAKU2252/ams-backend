@@ -44,6 +44,9 @@ export const purchaseOrderItem = pgTable(
     poNumber: varchar({ length: 50 }).notNull(),
     // ยอดรวมจริงต่อบรรทัดจาก SAP (อาจ ≠ quantity × unitPrice เมื่อมีส่วนลด/ค่าขนส่ง) — ใช้เป็นเพดาน over-cost
     lineTotal: numeric({ mode: 'number' }).notNull(),
+    // ข้อมูล SAP sync — timestamp ให้สาวได้ว่าแถวเข้า/แก้เมื่อไหร่ (Finding #11)
+    createdAt: isoTimestamp().default(sql`now()`).notNull(),
+    updatedAt: isoTimestamp().default(sql`now()`).notNull(),
   },
   (table) => [
     foreignKey({

@@ -3,7 +3,7 @@
 // สมมติว่า master (department/employee) มีอยู่แล้ว — สคริปต์นี้เติมแค่ role + user
 // mock user ทุกคนรหัสผ่านเดียวกัน "password123" (dev เท่านั้น)
 import { db } from './index';
-import { role, user } from './schema';
+import { role, user, userEmail } from './schema';
 
 const MOCK_PASSWORD = 'password123';
 
@@ -34,7 +34,6 @@ async function seed() {
       {
         username: 'employee',
         displayName: 'สมชาย ใจดี',
-        email: 'somchai.j@company.co.th',
         passwordHash,
         roleId: roleId('EMPLOYEE'),
         employeeId: 1001, // ผูกกับ employee ที่ seed ไว้ — ใช้ตอบ My Asset
@@ -49,13 +48,25 @@ async function seed() {
       {
         username: 'finance',
         displayName: 'สมหญิง รักงาน',
-        email: 'somying.r@company.co.th',
         passwordHash,
         roleId: roleId('FINANCE'),
         employeeId: 1002,
       },
     ])
     .onConflictDoNothing({ target: user.username });
+
+  // email ย้ายไปตาราง user_email แล้ว — ใส่ตัวหลัก (PRIMARY) ให้ user ที่มี (query id กลับมาเพราะ serial)
+  const primaryEmails: Record<string, string> = {
+    employee: 'somchai.j@company.co.th',
+    finance: 'somying.r@company.co.th',
+  };
+  const allUsers = await db.select().from(user);
+  const emailRows = allUsers
+    .filter((u) => primaryEmails[u.username])
+    .map((u) => ({ userId: u.id, email: primaryEmails[u.username], status: 'PRIMARY' as const }));
+  if (emailRows.length > 0) {
+    await db.insert(userEmail).values(emailRows).onConflictDoNothing();
+  }
 
   const count = (await db.select().from(user)).length;
   console.log(`✅ seed เสร็จ — roles: ${roles.length}, users ในระบบ: ${count}`);

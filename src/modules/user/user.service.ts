@@ -1,17 +1,15 @@
 import { eq } from 'drizzle-orm';
 import { db } from '../../db';
-import { user, role, employee } from '../../db/schema';
+import { user, role, employee, userEmail } from '../../db/schema';
 import { BadRequestError, ConflictError } from '../../common/errors';
 import { createUserBody } from './user.schema';
 
 type CreateUserInput = typeof createUserBody.static;
 
 export async function createUser(input: CreateUserInput) {
-  // username ห้ามซ้ำ (DB มี uq_user_username อยู่แล้ว แต่เช็คก่อนเพื่อคืนข้อความชัดกว่า error ดิบจาก pg)
   const dup = await db.query.user.findFirst({ where: eq(user.username, input.username) });
   if (dup) throw new ConflictError('username นี้ถูกใช้แล้ว');
 
-  // เช็ค FK เองก่อน insert — ไม่งั้น pg โยน 23503 ดิบ ๆ เป็น 500 แทนที่จะเป็น 400 ข้อความชัด
   const roleExists = await db.query.role.findFirst({ where: eq(role.id, input.roleId) });
   if (!roleExists) throw new BadRequestError(`ไม่พบ role id ${input.roleId}`);
 
@@ -20,25 +18,35 @@ export async function createUser(input: CreateUserInput) {
     if (!employeeExists) throw new BadRequestError(`ไม่พบ employee id ${input.employeeId}`);
   }
 
-  // เก็บเฉพาะ hash (argon2id จาก Bun.password) — ไม่เคยเก็บ plaintext
   const passwordHash = await Bun.password.hash(input.password);
 
-  const [created] = await db
-    .insert(user)
-    .values({
-      username: input.username,
-      email: input.email ?? null,
-      displayName: input.displayName,
-      passwordHash,
-      roleId: input.roleId,
-      employeeId: input.employeeId ?? null,
-    })
-    .returning();
+  // สร้าง user + email หลัก (ถ้าส่งมา) ใน transaction เดียว — email ย้ายไปอยู่ตาราง user_email แล้ว
+  // ต้อง atomic: ถ้า insert email ล้มเหลว ต้องไม่เหลือ user ค้างที่ไม่มี email หลัก
+  const created = await db.transaction(async (tx) => {
+    const [row] = await tx
+      .insert(user)
+      .values({
+        username: input.username,
+        displayName: input.displayName,
+        firstName: input.firstName ?? null,
+        lastName: input.lastName ?? null,
+        passwordHash,
+        roleId: input.roleId,
+        employeeId: input.employeeId ?? null,
+      })
+      .returning();
+
+    // email แรกที่ส่งมาตอนสร้าง = ตัวหลัก (PRIMARY)
+    if (input.email) {
+      await tx.insert(userEmail).values({ userId: row.id, email: input.email, status: 'PRIMARY' });
+    }
+
+    return row;
+  });
 
   return stripSecret(created);
 }
 
-// passwordHash ห้ามหลุดออก API — ตัดทิ้งก่อนคืนค่า
 function stripSecret<T extends { passwordHash: string | null }>(row: T) {
   const { passwordHash: _omit, ...safe } = row;
   return safe;

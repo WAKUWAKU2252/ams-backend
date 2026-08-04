@@ -8,7 +8,7 @@ import { authGuard } from '../../plugins/auth';
 export const uploadRoutes = new Elysia({ prefix: '/uploads' })
   .use(authGuard)
   // ไม่ต้อง config parser — Elysia เห็น t.Files ใน schema แล้วสลับเป็น multipart ให้เอง
-  .post('/', ({ body }) => uploadService.saveFiles(body.files, body.entityKind), {
+  .post('/', ({ body, currentUser }) => uploadService.saveFiles(body.files, body.entityKind, currentUser.id), {
     body: uploadBody,
   })
   .get(
@@ -23,6 +23,6 @@ export const uploadRoutes = new Elysia({ prefix: '/uploads' })
     },
     { params: attachementIdParams },
   )
-  .delete('/:id', ({ params }) => uploadService.softDelete(params.id), {
+  .delete('/:id', ({ params, currentUser }) => uploadService.softDelete(params.id, currentUser.id), {
     params: attachementIdParams,
   });

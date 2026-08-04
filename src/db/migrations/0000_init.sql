@@ -3,6 +3,7 @@ CREATE TYPE "public"."request_status" AS ENUM('DRAFT', 'PENDING_APPROVAL', 'APPR
 CREATE TYPE "public"."asset_lifecycle" AS ENUM('DRAFT', 'REGISTERED');--> statement-breakpoint
 CREATE TYPE "public"."asset_status" AS ENUM('Active', 'Inactive', 'Under Maintenance', 'Lost', 'Disposed');--> statement-breakpoint
 CREATE TYPE "public"."doc_type" AS ENUM('INVOICE', 'ASSET_IMG');--> statement-breakpoint
+CREATE TYPE "public"."email_status" AS ENUM('PRIMARY', 'SECONDARY');--> statement-breakpoint
 CREATE TABLE "asset_request_line" (
 	"requestId" integer NOT NULL,
 	"grpoLineId" uuid NOT NULL,
@@ -50,6 +51,11 @@ CREATE TABLE "asset" (
 	"poItemId" uuid NOT NULL,
 	"unitNo" integer NOT NULL,
 	"acquisitionCost" numeric NOT NULL,
+	"acquisitionDate" date,
+	"usefulLifeYear" integer,
+	"salvageValue" numeric,
+	"accumulatedDepreciation" numeric,
+	"netBookValue" numeric,
 	"isSplitItem" boolean DEFAULT false NOT NULL,
 	"assetNumber" varchar(100),
 	"description" varchar(100),
@@ -58,7 +64,7 @@ CREATE TABLE "asset" (
 	"assetClass" varchar(50),
 	"qrCode" varchar(255),
 	"lifecycle" "asset_lifecycle" DEFAULT 'DRAFT' NOT NULL,
-	"status" "asset_status" DEFAULT 'Active',
+	"status" "asset_status" DEFAULT 'Active' NOT NULL,
 	"uomId" integer NOT NULL,
 	"employeeId" integer,
 	"locationId" integer NOT NULL,
@@ -82,15 +88,20 @@ CREATE TABLE "attachment" (
 	"storedName" varchar(100) NOT NULL,
 	"mimeType" varchar(100) NOT NULL,
 	"size" integer NOT NULL,
+	"uploadedBy" integer NOT NULL,
 	"createdAt" timestamp DEFAULT now() NOT NULL,
+	"updatedAt" timestamp DEFAULT now() NOT NULL,
 	"deletedAt" timestamp,
+	"deletedBy" integer,
 	CONSTRAINT "uq_attachment_id_doc_type" UNIQUE("id","docType")
 );
 --> statement-breakpoint
 CREATE TABLE "grpo" (
 	"id" serial PRIMARY KEY NOT NULL,
 	"grpoNo" varchar(50) NOT NULL,
-	"grpoDate" date NOT NULL
+	"grpoDate" date NOT NULL,
+	"createdAt" timestamp DEFAULT now() NOT NULL,
+	"updatedAt" timestamp DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "grpo_invoice" (
@@ -106,6 +117,8 @@ CREATE TABLE "grpo_line" (
 	"grpoId" integer NOT NULL,
 	"poItemId" uuid NOT NULL,
 	"receivedQty" integer NOT NULL,
+	"createdAt" timestamp DEFAULT now() NOT NULL,
+	"updatedAt" timestamp DEFAULT now() NOT NULL,
 	CONSTRAINT "uq_grpo_line_id_po_item" UNIQUE("id","poItemId")
 );
 --> statement-breakpoint
@@ -132,7 +145,9 @@ CREATE TABLE "purchase_order_item" (
 	"quantity" integer NOT NULL,
 	"unitPrice" numeric NOT NULL,
 	"poNumber" varchar(50) NOT NULL,
-	"lineTotal" numeric NOT NULL
+	"lineTotal" numeric NOT NULL,
+	"createdAt" timestamp DEFAULT now() NOT NULL,
+	"updatedAt" timestamp DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "asset_location" (
@@ -141,7 +156,8 @@ CREATE TABLE "asset_location" (
 	"mapUrl" varchar(500),
 	"isActive" boolean DEFAULT true NOT NULL,
 	"createdAt" timestamp DEFAULT now() NOT NULL,
-	"updatedAt" timestamp DEFAULT now() NOT NULL
+	"updatedAt" timestamp DEFAULT now() NOT NULL,
+	CONSTRAINT "uq_asset_location_name" UNIQUE("name")
 );
 --> statement-breakpoint
 CREATE TABLE "asset_sub_location" (
@@ -153,7 +169,7 @@ CREATE TABLE "asset_sub_location" (
 	"isActive" boolean DEFAULT true NOT NULL,
 	"createdAt" timestamp DEFAULT now() NOT NULL,
 	"updatedAt" timestamp DEFAULT now() NOT NULL,
-	CONSTRAINT "uq_asset_sub_location" UNIQUE("locationId","floor","room")
+	CONSTRAINT "uq_asset_sub_location" UNIQUE NULLS NOT DISTINCT ("locationId","floor","room")
 );
 --> statement-breakpoint
 CREATE TABLE "category" (
@@ -210,7 +226,6 @@ CREATE TABLE "role" (
 CREATE TABLE "user" (
 	"id" serial PRIMARY KEY NOT NULL,
 	"username" varchar(100) NOT NULL,
-	"email" varchar(100),
 	"displayName" varchar(100) NOT NULL,
 	"firstName" varchar(100),
 	"lastName" varchar(100),
@@ -222,6 +237,17 @@ CREATE TABLE "user" (
 	"updatedAt" timestamp DEFAULT now() NOT NULL,
 	"deletedAt" timestamp,
 	CONSTRAINT "uq_user_username" UNIQUE("username")
+);
+--> statement-breakpoint
+CREATE TABLE "user_email" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"userId" integer NOT NULL,
+	"email" varchar(100) NOT NULL,
+	"status" "email_status" DEFAULT 'SECONDARY' NOT NULL,
+	"isActive" boolean DEFAULT true NOT NULL,
+	"createdAt" timestamp DEFAULT now() NOT NULL,
+	"updatedAt" timestamp DEFAULT now() NOT NULL,
+	CONSTRAINT "uq_user_email_user_email" UNIQUE("userId","email")
 );
 --> statement-breakpoint
 ALTER TABLE "asset_request_line" ADD CONSTRAINT "fk_asset_request_line_request" FOREIGN KEY ("requestId") REFERENCES "public"."asset_request"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
@@ -247,6 +273,8 @@ ALTER TABLE "asset" ADD CONSTRAINT "fk_asset_employee" FOREIGN KEY ("employeeId"
 ALTER TABLE "asset" ADD CONSTRAINT "fk_asset_created_by" FOREIGN KEY ("createdBy") REFERENCES "public"."user"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "asset" ADD CONSTRAINT "fk_asset_updated_by" FOREIGN KEY ("updatedBy") REFERENCES "public"."user"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "asset" ADD CONSTRAINT "fk_asset_deleted_by" FOREIGN KEY ("deletedBy") REFERENCES "public"."user"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "attachment" ADD CONSTRAINT "fk_attachment_uploaded_by" FOREIGN KEY ("uploadedBy") REFERENCES "public"."user"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "attachment" ADD CONSTRAINT "fk_attachment_deleted_by" FOREIGN KEY ("deletedBy") REFERENCES "public"."user"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "grpo_invoice" ADD CONSTRAINT "fk_grpo_invoice_grpo" FOREIGN KEY ("grpoId") REFERENCES "public"."grpo"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "grpo_invoice" ADD CONSTRAINT "fk_grpo_invoice_attachment" FOREIGN KEY ("attachmentId","attachmentDocType") REFERENCES "public"."attachment"("id","docType") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "grpo_line" ADD CONSTRAINT "fk_grpo_line_grpo" FOREIGN KEY ("grpoId") REFERENCES "public"."grpo"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -258,6 +286,7 @@ ALTER TABLE "department" ADD CONSTRAINT "department_managerId_employee_id_fk" FO
 ALTER TABLE "employee" ADD CONSTRAINT "fk_employee_department" FOREIGN KEY ("departmentId") REFERENCES "public"."department"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "user" ADD CONSTRAINT "fk_user_role" FOREIGN KEY ("roleId") REFERENCES "public"."role"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "user" ADD CONSTRAINT "fk_user_employee" FOREIGN KEY ("employeeId") REFERENCES "public"."employee"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "user_email" ADD CONSTRAINT "fk_user_email_user" FOREIGN KEY ("userId") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "idx_asset_request_line_grpo_line_id" ON "asset_request_line" USING btree ("grpoLineId");--> statement-breakpoint
 CREATE INDEX "idx_asset_request_line_created_by" ON "asset_request_line" USING btree ("createdBy");--> statement-breakpoint
 CREATE INDEX "idx_asset_request_line_updated_by" ON "asset_request_line" USING btree ("updatedBy");--> statement-breakpoint
@@ -277,10 +306,13 @@ CREATE INDEX "idx_asset_grpo_line_id" ON "asset" USING btree ("grpoLineId");--> 
 CREATE INDEX "idx_asset_created_by" ON "asset" USING btree ("createdBy");--> statement-breakpoint
 CREATE INDEX "idx_asset_updated_by" ON "asset" USING btree ("updatedBy");--> statement-breakpoint
 CREATE INDEX "idx_asset_deleted_by" ON "asset" USING btree ("deletedBy");--> statement-breakpoint
-CREATE UNIQUE INDEX "uq_asset_number" ON "asset" USING btree ("assetNumber");--> statement-breakpoint
+CREATE UNIQUE INDEX "uq_asset_number" ON "asset" USING btree ("assetNumber") WHERE "asset"."deletedAt" IS NULL;--> statement-breakpoint
 CREATE INDEX "idx_asset_po_item_id" ON "asset" USING btree ("poItemId");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_asset_po_item_unit_no" ON "asset" USING btree ("poItemId","unitNo") WHERE "asset"."deletedAt" IS NULL;--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_asset_image" ON "asset" USING btree ("imageId");--> statement-breakpoint
+CREATE UNIQUE INDEX "uq_asset_qr_code" ON "asset" USING btree ("qrCode") WHERE "asset"."deletedAt" IS NULL;--> statement-breakpoint
+CREATE INDEX "idx_attachment_uploaded_by" ON "attachment" USING btree ("uploadedBy");--> statement-breakpoint
+CREATE INDEX "idx_attachment_deleted_by" ON "attachment" USING btree ("deletedBy");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_grpo_no" ON "grpo" USING btree ("grpoNo");--> statement-breakpoint
 CREATE INDEX "idx_grpo_invoice_attachment_id" ON "grpo_invoice" USING btree ("attachmentId");--> statement-breakpoint
 CREATE INDEX "idx_grpo_line_grpo_id" ON "grpo_line" USING btree ("grpoId");--> statement-breakpoint
@@ -292,4 +324,6 @@ CREATE INDEX "idx_asset_sub_location_location_id" ON "asset_sub_location" USING 
 CREATE INDEX "idx_department_manager_id" ON "department" USING btree ("managerId");--> statement-breakpoint
 CREATE INDEX "idx_employee_department_id" ON "employee" USING btree ("departmentId");--> statement-breakpoint
 CREATE INDEX "idx_user_role_id" ON "user" USING btree ("roleId");--> statement-breakpoint
-CREATE INDEX "idx_user_employee_id" ON "user" USING btree ("employeeId");
+CREATE INDEX "idx_user_employee_id" ON "user" USING btree ("employeeId");--> statement-breakpoint
+CREATE INDEX "idx_user_email_user_id" ON "user_email" USING btree ("userId");--> statement-breakpoint
+CREATE UNIQUE INDEX "uq_user_email_one_primary" ON "user_email" USING btree ("userId") WHERE status = 'PRIMARY';
