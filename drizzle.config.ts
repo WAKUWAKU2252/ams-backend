@@ -3,8 +3,10 @@ import { defineConfig } from 'drizzle-kit';
 // drizzle-kit เป็น tooling แยกจาก runtime ของ Bun — ใช้ process.env (kit โหลด .env ให้เอง)
 export default defineConfig({
   dialect: 'postgresql',
-  schema: './src/db/schema',
-  out: './src/db/migrations',
+  // ต้องชี้ตรงกับที่ schema/migrations อยู่จริง — ถ้า path ผิด drizzle-kit จะมองไม่เห็น
+  // ตารางไหนเลย แล้ว push จะ generate DROP ให้ทุกตารางใน ams_db
+  schema: './src/intrastucture/db/schema',
+  out: './src/intrastucture/db/migrations',
   dbCredentials: {
     host: process.env.DB_HOST ?? 'localhost',
     port: Number(process.env.DB_PORT ?? 5433),

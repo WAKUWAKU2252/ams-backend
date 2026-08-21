@@ -1,0 +1,5 @@
+[test]
+# ต้อง preload: setup.ts สลับ db ของทั้งแอปเป็น PGlite ในหน่วยความจำ *ก่อน* ไฟล์เทสต์
+# import service ตัวไหน — ไม่งั้น service จะ import { db } ตัวจริงที่ต่อ Postgres ของ
+# เซิร์ฟเวอร์ตาม .env แล้วเทสต์จะเขียนทับข้อมูลจริง
+preload = ["./test/setup.ts"]

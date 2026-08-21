@@ -1,0 +1,2 @@
+ALTER TABLE "asset_request" ADD COLUMN "completedBy" integer;--> statement-breakpoint
+ALTER TABLE "asset_request" ADD CONSTRAINT "fk_asset_request_completed_by" FOREIGN KEY ("completedBy") REFERENCES "public"."user"("id") ON DELETE no action ON UPDATE no action;

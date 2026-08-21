@@ -1,7 +1,7 @@
 import { Elysia } from 'elysia';
 import { jwt } from '@elysiajs/jwt';
-import { env } from '../config/env';
-import { UnauthorizedError, ForbiddenError } from '../common/errors';
+import { env } from '@config/env';
+import { UnauthorizedError, ForbiddenError } from '@common/errors';
 
 // sign/verify JWT — ตั้ง secret + อายุ token ที่เดียว (ยังไม่ทำ refresh token ระยะนี้)
 export const jwtPlugin = jwt({
@@ -31,7 +31,14 @@ export const authGuard = new Elysia({ name: 'authGuard' })
   });
 
 // requireRole('MANAGER', 'FINANCE') — บังคับ role ต่อจาก authGuard
-// ใช้: new Elysia().use(requireRole('FINANCE')).get(...)  → 401 ถ้าไม่ล็อกอิน, 403 ถ้า role ไม่ตรง
+// ใช้: new Elysia().use(authGuard).use(requireRole('FINANCE')).get(...)
+//      → 401 ถ้าไม่ล็อกอิน, 403 ถ้า role ไม่ตรง
+//
+// ★ ต้อง .use(authGuard) ที่ instance เดียวกันด้วยเสมอ ห้ามใช้ requireRole ตัวเดียวโดด ๆ
+//   authGuard ข้างในนี้ทำให้ hook ตัวล่างเห็น currentUser ก็จริง แต่ derive เป็น 'scoped'
+//   ที่กระจายขึ้นแค่ชั้นเดียว — พอ instance ปลายทาง .use(requireRole(...)) เฉย ๆ ตัว
+//   currentUser จะไม่ถูก derive ในสโคปนั้น hook จึงอ่านได้ undefined แล้วโยน 401 ทิ้ง
+//   ทุกคำขอ ต่อให้ token ถูกต้อง (เคยทำให้ POST /users สร้าง user ไม่ได้ทั้งเส้น)
 export const requireRole = (...roles: string[]) =>
   new Elysia()
     .use(authGuard)

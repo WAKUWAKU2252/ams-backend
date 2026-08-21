@@ -1,0 +1,88 @@
+SQL for query SAP
+
+
+หา invoice เชื่อมกับ asset no. po และ grpo
+SELECT TOP 500
+    inv.DocNum      AS invoiceNo,
+    inv.DocDate     AS invoiceDate,
+    inv.CardName    AS vendorName,
+    i1.LineNum      AS invLine,
+    i1.ItemCode     AS itemCode,
+    i1.Dscription   AS itemDescription,
+    i1.Quantity     AS qty,
+    i1.LineTotal    AS lineTotal,
+    grn.DocNum      AS grpoNo,
+    grn.DocDate     AS grpoDate,
+    po.DocNum       AS poNo,
+    po.DocDate      AS poDate,
+    CASE i1.BaseType
+        WHEN 20 THEN 'ผ่าน GRPO'
+        WHEN 22 THEN 'อ้าง PO ตรง'
+        ELSE 'ไม่อ้างเอกสารต้นทาง'
+    END             AS linkPath
+FROM OPCH inv
+JOIN PCH1 i1  ON i1.DocEntry  = inv.DocEntry
+JOIN OITM itm ON itm.ItemCode = i1.ItemCode
+LEFT JOIN PDN1 d1  ON i1.BaseType = 20
+                  AND d1.DocEntry = i1.BaseEntry
+                  AND d1.LineNum  = i1.BaseLine
+LEFT JOIN OPDN grn ON grn.DocEntry = d1.DocEntry
+LEFT JOIN POR1 p1  ON (d1.BaseType = 22 AND p1.DocEntry = d1.BaseEntry AND p1.LineNum = d1.BaseLine)
+                   OR (i1.BaseType = 22 AND p1.DocEntry = i1.BaseEntry AND p1.LineNum = i1.BaseLine)
+LEFT JOIN OPOR po  ON po.DocEntry = p1.DocEntry
+WHERE itm.ItmsGrpCod IN (117)
+  AND inv.CANCELED = 'N'
+  AND inv.DocDate >= '2025-01-01'
+ORDER BY inv.DocNum, i1.LineNum;
+
+
+หา invoice เชื่อมกับ comment asset no. po และ grpo
+SELECT TOP 100
+    inv.DocNum      AS invoiceNo,
+    inv.DocDate     AS invoiceDate,
+    inv.CardCode    AS vendorCode,
+    inv.CardName    AS vendorName,
+    inv.NumAtCard   AS vendorRefNo,
+    inv.Comments    AS headerComment,
+    inv.JrnlMemo    AS journalMemo,
+    i1.LineNum      AS invLine,
+    i1.ItemCode     AS itemCode,
+    i1.Dscription   AS itemDescription,
+    i1.FreeTxt      AS lineComment,
+    i1.Quantity     AS qty,
+    i1.LineTotal    AS lineTotal,
+    i1.BaseType     AS baseType,
+    grn.DocNum      AS grpoNo,
+    po.DocNum       AS poNo
+FROM OPCH inv
+JOIN PCH1 i1  ON i1.DocEntry  = inv.DocEntry
+JOIN OITM itm ON itm.ItemCode = i1.ItemCode
+LEFT JOIN PDN1 d1  ON i1.BaseType = 20 AND d1.DocEntry = i1.BaseEntry AND d1.LineNum = i1.BaseLine
+LEFT JOIN OPDN grn ON grn.DocEntry = d1.DocEntry
+LEFT JOIN POR1 p1  ON (d1.BaseType = 22 AND p1.DocEntry = d1.BaseEntry AND p1.LineNum = d1.BaseLine)
+                   OR (i1.BaseType = 22 AND p1.DocEntry = i1.BaseEntry AND p1.LineNum = i1.BaseLine)
+LEFT JOIN OPOR po  ON po.DocEntry = p1.DocEntry
+WHERE itm.ItmsGrpCod IN (117)
+  AND inv.CANCELED = 'N'
+  AND inv.DocDate >= '2025-01-01'
+ORDER BY inv.DocNum, i1.LineNum;
+
+
+
+test req ใหม่
+BEGIN;
+-- ชิ้น: คืนเป็น "ยังไม่ออกเลข" + ล้างร่องรอยตีกลับ/ปิดถาวรให้หมด
+UPDATE asset SET
+  lifecycle = 'DRAFT', "assetNumber" = NULL,
+  "rejectedAt" = NULL, "rejectedBy" = NULL, "rejectReason" = NULL, "rejectedRole" = NULL,
+  "cancelReason" = NULL, "cancelledAt" = NULL, "cancelledBy" = NULL,
+  "updatedAt" = now()
+WHERE "requestId" = 3 AND "deletedAt" IS NULL;
+
+-- ใบ: ดึงกลับเข้าคิวบัญชี (status ยังเป็น APPROVED อยู่แล้ว ไม่ต้องแตะ)
+UPDATE asset_request SET
+  "completeNotifiedAt" = NULL, "completeNotifyError" = NULL,
+  "completeDate" = NULL, "completedBy" = NULL,
+  "updatedAt" = now()
+WHERE id = 3;
+COMMIT;
