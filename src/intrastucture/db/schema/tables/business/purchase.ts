@@ -3,6 +3,7 @@ import { pgTable, pgEnum, varchar, date, uuid, integer, numeric, foreignKey, ind
 import { sql } from 'drizzle-orm';
 import { isoTimestamp } from '@intrastucture/db/schema/shared/iso-timestamp';
 import { employee } from './master';
+import { company } from './company';
 
 // สถานะใบสั่งซื้อฝั่ง SAP (OPOR.DocStatus) — 'O' = Open, 'C' = Closed
 // เก็บเป็นคำเต็มไม่ใช่ตัวอักษรเดียว เพราะ 'O'/'C' อ่านไม่ออกถ้าไม่เปิดคู่มือ SAP
@@ -15,7 +16,22 @@ export const enumPoDocStatus = pgEnum('po_doc_status', ['OPEN', 'CLOSED']);
 export const purchaseOrder = pgTable(
   'purchase_order',
   {
+    // ── เลขเต็มพร้อม prefix เช่น 'APO-62605007' / 'PPO-12608073' (0021)
+    //
+    // เดิมเก็บ OPOR.DocNum เปล่า ๆ ('62605007') ซึ่งตัดตัวตนทิ้งไปครึ่งหนึ่ง — SAP สอง
+    // บริษัทเดินเลขในช่วงเดียวกันเป๊ะ เลขเปล่าจึงชนกันข้ามบริษัท และยังชนข้ามชนิดเอกสาร
+    // ด้วย (PO หลักนำ 1 กับ GRPO สาย AGP- ใช้ช่วง 1YYMMNNN เหมือนกัน)
+    //
+    // prefix มาจาก NNM1.BeginStr ซึ่งมี '-' ติดมาในค่าอยู่แล้ว ต่อ DocNum ตรง ๆ ไม่ต้องเติม
+    // เก็บเป็นสตริงเดียวโดยตั้งใจ ไม่แตกเป็น composite key: poNumber ถูกอ้าง 148 จุดใน
+    // 24 ไฟล์ รวม route param และ payload ของ Teams — prefix แก้ปัญหาได้ครบโดยไม่ต้องแตะ
     poNumber: varchar({ length: 50 }).primaryKey().notNull(),
+    // บริษัทเจ้าของใบ — ต้องมีแยกจาก prefix เพราะ prefix ใช้ตอบได้แค่กับเลขเอกสาร
+    // ส่วน employee.ownerCode / itemCode ไม่มี prefix ติดมาให้แยก
+    companyCode: varchar({ length: 20 }).notNull(),
+    // OPOR.DocEntry — PK จริงฝั่ง SAP ที่ไม่มีวันเปลี่ยน (DocNum ซ้ำข้าม series ได้)
+    // ก่อนหน้านี้ poWindow() select มาอยู่แล้วแต่ทิ้งไปเฉย ๆ
+    docEntry: integer(),
     vendorName: varchar({ length: 100 }),
     poDate: date(),
     // ── ผู้ขอซื้อ (OwnerPR) — คนที่เปิดใบขอซื้อฝั่ง SAP
@@ -49,6 +65,16 @@ export const purchaseOrder = pgTable(
     }),
     // pg ไม่สร้าง index ให้ฝั่ง FK เอง — ใช้ตอน join หาแผนกของผู้ขอ
     index('idx_purchase_order_owner_pr_id').on(table.ownerPrId),
+    // ไม่ cascade: ลบบริษัทที่ยังมีเอกสารอยู่ไม่ได้
+    foreignKey({
+      columns: [table.companyCode],
+      foreignColumns: [company.code],
+      name: 'fk_purchase_order_company',
+    }),
+    index('idx_purchase_order_company_code').on(table.companyCode),
+    // ตัวตนจริงฝั่ง SAP — ห้ามซ้ำภายในบริษัทเดียวกัน (ข้ามบริษัทซ้ำได้ คนละฐาน)
+    // nullable ได้หลายแถวใน pg จึงไม่บล็อกแถวเก่าที่ยังไม่มี docEntry
+    unique('uq_purchase_order_doc_entry').on(table.companyCode, table.docEntry),
   ],
 );
 

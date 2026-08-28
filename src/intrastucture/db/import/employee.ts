@@ -177,7 +177,10 @@ async function main() {
     firstNameEn: sql`excluded."firstNameEn"`,
     lastNameEn: sql`excluded."lastNameEn"`,
     email: sql`COALESCE(excluded.email, ${employee.email})`,
-    ownerCode: sql`COALESCE(excluded."ownerCode", ${employee.ownerCode})`,
+    // สคริปต์นี้อ่านไฟล์ที่มาจาก OHEM ของ UBA ฐานเดียว จึงลงคอลัมน์ของ UBA เสมอ (0021)
+    // ⚠️ ตัวตนฝั่ง UBP ต้องนำเข้าด้วยสคริปต์แยกที่เขียนลง ownerCodeUbp — ห้ามยัดมาที่นี่
+    //    เพราะเลขสองฐานทับกัน 264 ตัว ลงผิดช่องคือผูก PO เข้ากับคนผิดบริษัท
+    ownerCodeUba: sql`COALESCE(excluded."ownerCodeUba", ${employee.ownerCodeUba})`,
     departmentId: sql`excluded."departmentId"`,
     isActive: sql`excluded."isActive"`,
     updatedAt: sql`now()`,
@@ -194,7 +197,10 @@ async function main() {
       await tx.insert(employee).values(byEmpId).onConflictDoUpdate({ target: employee.empId, set: onUpdate });
     }
     if (byOwner.length) {
-      await tx.insert(employee).values(byOwner).onConflictDoUpdate({ target: employee.ownerCode, set: onUpdate });
+      await tx
+        .insert(employee)
+        .values(byOwner)
+        .onConflictDoUpdate({ target: employee.ownerCodeUba, set: onUpdate });
     }
   });
 

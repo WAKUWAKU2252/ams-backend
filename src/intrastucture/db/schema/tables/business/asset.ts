@@ -17,6 +17,7 @@ import { sql } from 'drizzle-orm';
 import { isoTimestamp } from '@intrastucture/db/schema/shared/iso-timestamp';
 import { attachment, enumDocType } from './attachment';
 import { grpoLine } from './grpo';
+import { company } from './company';
 import { assetRequest } from './asset-request';
 import { category, assetLocation, assetSubLocation, department, employee } from './master';
 import { user } from '@intrastucture/db/schema/user';
@@ -64,6 +65,9 @@ export const asset = pgTable(
     //    ที่บังคับว่า PO_FLOW ต้องมีครบทุกตัว ส่วน SAP_LEGACY ต้องว่างทั้งชุด
     //    NULL ที่นี่จึงไม่เคยแปลว่า "ลืมกรอก" — มันแปลว่า "ของชิ้นนี้ไม่ได้มาทางจัดซื้อ"
     origin: enumAssetOrigin().default('PO_FLOW').notNull(),
+    // บริษัทเจ้าของชิ้นนี้ (0021) — ต้องมีบน asset เอง ไม่ derive จาก PO ย้อนขึ้นไป
+    // เพราะสาย SAP_LEGACY ไม่มีโซ่ PO ให้ไต่เลย (requestId..acquisitionCost เป็น NULL ทั้งชุด)
+    companyCode: varchar({ length: 20 }).notNull(),
     requestId: integer(),
     grpoLineId: uuid(),
     // copy ลงมาจาก grpo_line เพื่อให้ตั้ง unique (poItemId, unitNo) ได้ — unique ข้ามตารางทำไม่ได้
@@ -323,7 +327,19 @@ export const asset = pgTable(
     index('idx_asset_deleted_by').on(table.deletedBy),
     // เลข SAP ต้องไม่ซ้ำ — pg ยอมหลาย NULL อยู่แล้ว (ช่วง DRAFT ยังไม่มีเลข)
     // partial WHERE deletedAt IS NULL: asset ที่ลบแล้วต้องคืนเลข SAP ให้ใช้ซ้ำได้ (ในบัญชีเลขนั้นว่างแล้ว)
-    uniqueIndex('uq_asset_number').on(table.assetNumber).where(sql`${table.deletedAt} IS NULL`),
+    //
+    // เติม companyCode เข้าคีย์ใน 0021 — เลขสินทรัพย์ (OITM.ItemCode) ชนกันข้ามบริษัทจริง
+    // วัดแล้ว 24 ตัวที่ UBP ใช้เลขเดียวกับของ UBA ที่มีอยู่แล้ว ถ้าไม่เติม import UBP
+    // จะ fail 24 แถว ส่วนเลขในบริษัทเดียวกันยังห้ามซ้ำเหมือนเดิมทุกประการ
+    uniqueIndex('uq_asset_number')
+      .on(table.companyCode, table.assetNumber)
+      .where(sql`${table.deletedAt} IS NULL`),
+    foreignKey({
+      columns: [table.companyCode],
+      foreignColumns: [company.code],
+      name: 'fk_asset_company',
+    }),
+    index('idx_asset_company_code').on(table.companyCode),
     // ใช้ตอนนับ/กรองรายชิ้นต่อ PO line โดยไม่ต้อง join grpo_line ก่อนทุกครั้ง
     index('idx_asset_po_item_id').on(table.poItemId),
     // ★ หัวใจของการคุมจำนวน: เลขชิ้นห้ามซ้ำในบรรทัดเดียวกัน

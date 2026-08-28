@@ -7,6 +7,9 @@
 // drizzle.config.ts ชี้มาที่โฟลเดอร์นี้ — ไฟล์ใหม่ที่ไม่ถูก re-export ที่นี่
 // drizzle-kit จะมองไม่เห็น แล้วสั่ง DROP ตารางนั้นตอน push
 export * from './tables/business/legacy';
+// company ต้องมาก่อนทุกตารางที่อ้างถึงมัน (0021) — ลำดับ export ไม่มีผลต่อ runtime
+// แต่ช่วยให้อ่านออกว่าอะไรเป็นฐานของอะไร
+export * from './tables/business/company';
 export * from './tables/business/purchase';
 export * from './tables/business/grpo';
 export * from './tables/business/attachment';

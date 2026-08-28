@@ -44,7 +44,7 @@
 //
 // ── QR เป็นข้อยกเว้นที่สาม: AMS ประกอบเอง ไม่ได้มาจาก SAP แต่ทับเสมอ
 //
-// ค่ามาจาก assetQrUrl(assetNumber) = APP_BASE_URL + เลขสินทรัพย์ ไม่มีอะไรของ SAP อยู่ในนั้น
+// ค่ามาจาก assetQrUrl(companyCode, assetNumber) = APP_BASE_URL + บริษัท + เลขสินทรัพย์
 // ต้องเติมตอน sync เพราะของเก่า 2,700+ ชิ้นต้องติดสติกเกอร์เหมือนของที่ลงทะเบียนผ่าน AMS
 //
 // ทับเสมอเพราะมันเป็นค่า derive ที่ผูกกับ config ไม่ใช่ข้อมูลที่ใครกรอก — ถ้าตรึงค่าแรกไว้
@@ -88,6 +88,7 @@ import {
 } from '@intrastucture/db/schema';
 import { sapQuery } from '@intrastucture/sap/client';
 import { legacyAssetAll, purchasingItemAll } from '@intrastucture/sap/queries';
+import { ownerCodeColumn, lockKeyFor } from '@/modules/integrate/SAP/company.util';
 import type { SyncConnector, Tx, PullResult, SyncState } from '@/modules/integrate/SAP/sync.engine';
 import { emptyResult } from '@/modules/integrate/SAP/sync.engine';
 import { requireRow } from '@common/db-result';
@@ -120,7 +121,10 @@ export type LegacyAssetRow = {
   //    ทั้งชุดเป็น null พร้อมกันได้ = ชิ้นนั้นยังไม่มียอดบัญชีใน SAP
   /** ITM8.PeriodCat — SAP เก็บเป็นสตริงปีสี่หลัก '2026' */
   fiscalYear: string | null;
+  /** ITM8.APC — **ยอดยกมาต้นปีบัญชี** ปีที่ซื้อจึงเป็น 0 เสมอ (ดู resolveBookedCost) */
   bookedCost: number | null;
+  /** SUM(ACQ1.LineTotal) ต่อชิ้น — ยอดรวมรายการซื้อที่เคยเกิด ใช้ถอยไปหาเมื่อ APC ยังเป็น 0 */
+  acquisitionPostedTotal: number | null;
   bookedCostHistorical: number | null;
   accumulatedDepreciation: number | null;
   salvageValue: number | null;
@@ -322,10 +326,34 @@ const ADJUSTMENT_FIELDS = [
 const hasUnsupportedAdjustment = (a: AccountingSnapshot): boolean =>
   ADJUSTMENT_FIELDS.some((f) => a[f] != null && toNum(a[f]) !== 0);
 
+/**
+ * มูลค่าทุนทางบัญชีที่ใช้จริง — APC ก่อน ถ้ายังเป็น 0 ค่อยถอยไปใช้ยอดรวมรายการซื้อ
+ *
+ * `ITM8.APC` คือ **ยอดยกมาต้นปีบัญชี** ไม่ใช่ยอดปลายปี ปีที่ซื้อจึงเป็น 0 เสมอเพราะตอน
+ * ต้นปีของยังไม่เข้ามา ตัวรายการซื้อจริงอยู่ที่ ACQ1 แล้วมูลค่าถึงไปโผล่ใน ITM8 ปีถัดไป
+ * (ยืนยันกับ COM-100-05-002: ปี 2005 APC=0 / ปี 2006 เป็นต้นไป APC=12,871.03 = ACQ1 เป๊ะ)
+ *
+ * ผลคือของที่เพิ่งซื้อในปีบัญชีปัจจุบันมีแถว ITM8 แถวเดียวคือแถวปีที่ซื้อ ซึ่ง APC = 0
+ * — วัด 2026-08-24: 101 จาก 2,726 ชิ้นเป็นแบบนี้ และ 100 ชิ้นมียอดจริงใน ACQ1
+ * ถ้าไม่ถอยไปเอา ของใหม่ทุกชิ้นจะเข้าระบบด้วยมูลค่า 0 โดยรอบ sync ยังขึ้น SUCCESS
+ *
+ * ★ ถอยเฉพาะตอน APC เป็น 0/NULL เท่านั้น **ห้ามให้ ACQ1 ทับเมื่อ APC มีค่าแล้ว** —
+ * ACQ1 เป็นยอดรวม "รายการซื้อทั้งหมดที่เคยเกิด" ส่วน APC เป็นยอดคงเหลือที่ผ่านการ
+ * ตัดจำหน่าย/ปรับปรุงมาแล้ว ทับเมื่อไหร่ = ฟื้นมูลค่าของที่ตัดจำหน่ายไปแล้วกลับมา
+ * (ชุดที่วัดได้ไม่มีเคสตัดจำหน่ายปนมาเลย แต่กติกานี้กันไว้ล่วงหน้า)
+ *
+ * ACQ1 ไม่มีอะไรให้ = คืนค่าเดิมของ ITM8 ตามตรง (0 หรือ null) ไม่แต่งให้ดูดีกว่าความจริง
+ * — มี 1 ชิ้นที่ไม่มียอดทั้งสองฝั่ง ซึ่งแปลว่าไม่เคยมีรายการซื้อจริง
+ */
+function resolveBookedCost(r: LegacyAssetRow): number | null {
+  if (r.bookedCost != null && toNum(r.bookedCost) !== 0) return r.bookedCost;
+  return r.acquisitionPostedTotal ?? r.bookedCost;
+}
+
 /** คัดเฉพาะช่องบัญชีออกจากแถวดิบ — ตัวแยก "ทะเบียนของ" กับ "ตัวเลขบัญชี" ออกจากกัน */
 const pickAccounting = (r: LegacyAssetRow): AccountingSnapshot => ({
   fiscalYear: r.fiscalYear,
-  bookedCost: r.bookedCost,
+  bookedCost: resolveBookedCost(r),
   bookedCostHistorical: r.bookedCostHistorical,
   accumulatedDepreciation: r.accumulatedDepreciation,
   salvageValue: r.salvageValue,
@@ -472,12 +500,19 @@ async function applyAccounting(tx: Tx, items: LegacyAsset[]): Promise<void> {
   }
 }
 
-const readState = (rows: (typeof sapAssetSync.$inferSelect)[]): SyncState =>
-  requireRow(rows, 'อ่าน sap_asset_sync (id=1)');
+const readState = (rows: (typeof sapAssetSync.$inferSelect)[], companyCode: string): SyncState =>
+  requireRow(rows, `อ่าน sap_asset_sync (companyCode=${companyCode})`);
 
-export const assetConnector: SyncConnector<LegacyAssetPull> = {
-  entity: 'asset',
-  lockKey: 811003,
+/** base ของ advisory lock สำหรับ entity นี้ — ผสมกับบริษัทด้วย lockKeyFor() */
+const LOCK_BASE = 811003;
+
+/** สร้าง connector ที่ผูกกับบริษัทหนึ่ง (0021) — ดูเหตุผลเต็มที่ makePoConnector */
+export const makeAssetConnector = (
+  companyCode: string,
+  itemGroups: string | null,
+): SyncConnector<LegacyAssetPull> => ({
+  entity: `asset:${companyCode}`,
+  lockKey: lockKeyFor(LOCK_BASE, companyCode),
 
   // ไม่มีอดีตให้ตามเก็บ — คืน null เพื่อให้ engine ปักพื้นที่ "ตอนนี้" แล้วเลิกโหมด backfill
   // ตั้งแต่รอบแรก (ทางเดียวกับที่ PO/GRPO ใช้ตอน SAP ไม่มีแถวเข้าเกณฑ์เลย)
@@ -491,8 +526,10 @@ export const assetConnector: SyncConnector<LegacyAssetPull> = {
   // ไม่มี join) — เหตุผลที่ห้ามยุบรวมอยู่ที่ purchasingItemAll() ใน queries.ts
   async fetch() {
     const [assets, purchasing] = await Promise.all([
-      sapQuery<LegacyAssetRow>(legacyAssetAll(), {}),
-      sapQuery<PurchasingItemRow>(purchasingItemAll(), {}),
+      // legacyAssetAll ไม่รับ itemGroups แล้ว — กรองด้วย ItemType = 'F' ซึ่งเป็นความหมาย
+      // ไม่ใช่ผังกลุ่มของแต่ละบริษัท (ดู queries.ts) ส่วนรหัสจัดซื้อยังต้องใช้กลุ่มอยู่
+      sapQuery<LegacyAssetRow>(companyCode, legacyAssetAll(), {}),
+      sapQuery<PurchasingItemRow>(companyCode, purchasingItemAll(itemGroups), {}),
     ]);
     return { assets, purchasing };
   },
@@ -570,8 +607,10 @@ export const assetConnector: SyncConnector<LegacyAssetPull> = {
         .filter((r): r is { id: number; sapId: number } => r.sapId !== null)
         .map((r) => [r.sapId, r.id]),
     );
+    // ★ คอลัมน์ ownerCode ของบริษัทนี้เท่านั้น (0021) — OHEM สองฐานเลขทับกัน 264 ตัว
+    const ownerCol = ownerCodeColumn(companyCode);
     const employeeByOwnerCode = new Map(
-      (await tx.select({ id: employee.id, ownerCode: employee.ownerCode }).from(employee))
+      (await tx.select({ id: employee.id, ownerCode: ownerCol }).from(employee))
         .filter((r): r is { id: number; ownerCode: number } => r.ownerCode !== null)
         .map((r) => [r.ownerCode, r.id]),
     );
@@ -599,7 +638,10 @@ export const assetConnector: SyncConnector<LegacyAssetPull> = {
       const found = await tx
         .select({ assetNumber: asset.assetNumber, origin: asset.origin, deletedAt: asset.deletedAt })
         .from(asset)
-        .where(inArray(asset.assetNumber, part));
+        // ★ ต้อง scope ด้วยบริษัท (0021) — เลขสินทรัพย์ชนกันข้ามบริษัท 24 ตัว
+        //   ไม่ scope แล้วจะเห็นแถวของอีกบริษัทแล้วสรุปผิดว่า "เลขนี้มีเจ้าของแล้ว"
+        //   ผลคือของ UBP ถูกข้ามทิ้งเงียบ ๆ 24 ชิ้น
+        .where(and(eq(asset.companyCode, companyCode), inArray(asset.assetNumber, part)));
       for (const r of found) {
         if (!r.assetNumber) continue;
         seenAtAll.add(r.assetNumber);
@@ -642,6 +684,7 @@ export const assetConnector: SyncConnector<LegacyAssetPull> = {
         .values(
           part.map((i) => ({
             origin: 'SAP_LEGACY' as const,
+            companyCode,
             assetNumber: i.assetNumber,
             description: i.description,
             assetClass: i.assetClass,
@@ -658,7 +701,7 @@ export const assetConnector: SyncConnector<LegacyAssetPull> = {
             // QR ไม่ได้มาจาก SAP — AMS ประกอบเองจากเลขสินทรัพย์ (ดู assetQrUrl)
             // ของเก่าที่ sync เข้ามาต้องติดสติกเกอร์เหมือนของที่ลงทะเบียนผ่าน AMS ทุกประการ
             // ถ้าไม่เติมให้ตรงนี้ 2,700+ ชิ้นจะไม่มี QR ให้พิมพ์เลยสักใบ
-            qrCode: assetQrUrl(i.assetNumber),
+            qrCode: assetQrUrl(companyCode, i.assetNumber),
             // SAP ไม่ได้ระบุที่ตั้ง (54 ชิ้น) หรือจับคู่ OLCT ไม่ได้ → ลงแถวพัก
             // locationId เป็น NOT NULL จึงต้องมีค่าเสมอ (ดูหมายเหตุ UNASSIGNED_LOCATION)
             locationId: i.locationId ?? location.id,
@@ -669,7 +712,10 @@ export const assetConnector: SyncConnector<LegacyAssetPull> = {
         // รอบ sync อื่นหรือคนกดสร้างแทรกเลขเดียวกันเข้ามา — สายนี้มีแต่ของใหม่ จำนวนเลข
         // ที่ถูกดึงจาก sequence จึงเท่ากับจำนวนสินทรัพย์ใหม่จริง ซึ่งเป็นสิ่งที่ควรกินอยู่แล้ว
         .onConflictDoUpdate({
-          target: asset.assetNumber,
+          // ★ ต้องเป็นสองคอลัมน์ให้ตรงกับ uq_asset_number หลัง 0021 — ระบุแค่ assetNumber
+          //   pg จะหา index ที่ใช้แก้ conflict ไม่เจอ (และถ้าเจอ index เก่าค้างอยู่ จะทับ
+          //   สินทรัพย์ของอีกบริษัทที่เลขตรงกัน ซึ่งวัดแล้วมี 24 ตัว)
+          target: [asset.companyCode, asset.assetNumber],
           // ต้องระบุให้ตรงกับ partial index uq_asset_number ไม่งั้น pg หา index ที่ใช้
           // แก้ conflict ไม่เจอแล้วโยน "no unique or exclusion constraint matching"
           targetWhere: isNull(asset.deletedAt),
@@ -737,7 +783,7 @@ export const assetConnector: SyncConnector<LegacyAssetPull> = {
                     ${i.categoryId}::integer, ${i.departmentId}::integer,
                     ${i.employeeId}::integer, ${i.uom}::varchar,
                     ${i.serialNumber}::varchar, ${i.locationId ?? location.id}::integer,
-                    ${assetQrUrl(i.assetNumber)}::varchar)`,
+                    ${assetQrUrl(companyCode, i.assetNumber)}::varchar)`,
       );
 
       await tx.execute(sql`
@@ -760,6 +806,8 @@ export const assetConnector: SyncConnector<LegacyAssetPull> = {
           "departmentId", "employeeId", "uom", "serialNumber", "locationId", "qrCode"
         )
         WHERE a."assetNumber" = v."assetNumber"
+          -- ★ ต้องมีบริษัทด้วย ไม่งั้นรอบ sync ของ UBA จะไปแก้แถวของ UBP ที่เลขตรงกัน
+          AND a."companyCode" = ${companyCode}
           AND a."deletedAt" IS NULL
           -- เงื่อนไขเดียวกับ setWhere ข้างบน: ของที่ลงทะเบียนผ่าน AMS แล้ว SAP ไม่ใช่เจ้าของ
           AND a.origin = 'SAP_LEGACY'
@@ -795,6 +843,8 @@ export const assetConnector: SyncConnector<LegacyAssetPull> = {
           "assetNumber", "assetClass", "categoryId", "uom"
         )
         WHERE a."assetNumber" = v."assetNumber"
+          -- ★ ต้องมีบริษัทด้วย ไม่งั้นรอบ sync ของ UBA จะไปแก้แถวของ UBP ที่เลขตรงกัน
+          AND a."companyCode" = ${companyCode}
           AND a."deletedAt" IS NULL
           -- ตรงข้ามกับสองสายบน: สายนี้แตะเฉพาะแถวที่ AMS เป็นคนสร้าง
           AND a.origin = 'PO_FLOW'
@@ -938,17 +988,17 @@ export const assetConnector: SyncConnector<LegacyAssetPull> = {
   },
 
   async readState(tx) {
-    const rows = await tx.select().from(sapAssetSync).where(eq(sapAssetSync.id, 1));
-    return readState(rows);
+    const rows = await tx.select().from(sapAssetSync).where(eq(sapAssetSync.companyCode, companyCode));
+    return readState(rows, companyCode);
   },
 
   async readStateOutsideTx() {
-    const rows = await db.select().from(sapAssetSync).where(eq(sapAssetSync.id, 1));
+    const rows = await db.select().from(sapAssetSync).where(eq(sapAssetSync.companyCode, companyCode));
     if (rows.length === 0) {
-      const created = await db.insert(sapAssetSync).values({ id: 1 }).returning();
-      return readState(created);
+      const created = await db.insert(sapAssetSync).values({ companyCode }).returning();
+      return readState(created, companyCode);
     }
-    return readState(rows);
+    return readState(rows, companyCode);
   },
 
   async writeState(tx, patch) {
@@ -956,14 +1006,14 @@ export const assetConnector: SyncConnector<LegacyAssetPull> = {
     await tx
       .update(sapAssetSync)
       .set({ ...patch, lastRunAt: now, updatedAt: now })
-      .where(eq(sapAssetSync.id, 1));
+      .where(eq(sapAssetSync.companyCode, companyCode));
   },
 
   async openEvent(tx, row) {
     const created = requireRow(
       await tx
         .insert(sapAssetSyncEvent)
-        .values({ ...row, status: 'RUNNING' })
+        .values({ ...row, companyCode, status: 'RUNNING' })
         .returning({ id: sapAssetSyncEvent.id }),
       'open sap_asset_sync_event',
     );
@@ -980,6 +1030,7 @@ export const assetConnector: SyncConnector<LegacyAssetPull> = {
   async logFailure(row) {
     const now = nowIso();
     await db.insert(sapAssetSyncEvent).values({
+      companyCode,
       trigger: row.trigger,
       triggeredBy: row.triggeredBy,
       mode: row.mode,
@@ -991,6 +1042,6 @@ export const assetConnector: SyncConnector<LegacyAssetPull> = {
     await db
       .update(sapAssetSync)
       .set({ lastStatus: 'FAILED', lastError: row.error, lastRunAt: now, updatedAt: now })
-      .where(eq(sapAssetSync.id, 1));
+      .where(eq(sapAssetSync.companyCode, companyCode));
   },
-};
+});

@@ -18,12 +18,16 @@ export function startSyncScheduler(): void {
   const run = () =>
     syncAll('SCHEDULED')
       .then((results) => {
-        for (const [entity, r] of Object.entries(results)) {
-          if (r.status === 'SUCCESS') {
-            // log แค่ตัวเลข ไม่ log ข้อมูลที่ดึงมา — เป็นข้อมูลจัดซื้อของบริษัท
-            console.log(`🔄 sync ${entity}: ${r.rowsHeader} header / ${r.rowsLine} line (${r.mode})`);
-          } else if (r.status === 'FAILED') {
-            console.error(`❌ sync ${entity}: ${r.error}`);
+        // ผลเป็นสองชั้นตั้งแต่ 0021: บริษัท -> entity
+        for (const [companyCode, byEntity] of Object.entries(results)) {
+          for (const [entity, r] of Object.entries(byEntity)) {
+            const tag = `${entity}:${companyCode}`;
+            if (r.status === 'SUCCESS') {
+              // log แค่ตัวเลข ไม่ log ข้อมูลที่ดึงมา — เป็นข้อมูลจัดซื้อของบริษัท
+              console.log(`🔄 sync ${tag}: ${r.rowsHeader} header / ${r.rowsLine} line (${r.mode})`);
+            } else if (r.status === 'FAILED') {
+              console.error(`❌ sync ${tag}: ${r.error}`);
+            }
           }
         }
       })

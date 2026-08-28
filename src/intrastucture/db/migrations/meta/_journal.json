@@ -148,6 +148,13 @@
       "when": 1787195678563,
       "tag": "0020_sloppy_scarlet_spider",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1787719490108,
+      "tag": "0021_multi_company",
+      "breakpoints": true
     }
   ]
 }

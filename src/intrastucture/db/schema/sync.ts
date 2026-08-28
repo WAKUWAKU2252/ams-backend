@@ -16,13 +16,11 @@ import {
   pgTable,
   pgEnum,
   serial,
-  smallint,
   integer,
   numeric,
   varchar,
   date,
   text,
-  check,
   index,
   primaryKey,
   foreignKey,
@@ -31,6 +29,7 @@ import { sql } from 'drizzle-orm';
 import { isoTimestamp } from './shared/iso-timestamp';
 // ผูก FK ไปที่ตาราง asset โดยตรง — asset.ts ไม่ได้ import ไฟล์นี้ จึงไม่เกิดวงกลม
 import { asset } from './tables/business/asset';
+import { company } from './tables/business/company';
 
 // ต้อง export — drizzle-kit อ่านเฉพาะ export ตอน generate ไม่งั้นไม่สร้าง CREATE TYPE ให้
 export const enumSyncTrigger = pgEnum('sync_trigger', ['BUTTON', 'SCHEDULED']);
@@ -44,9 +43,13 @@ export const enumSyncMode = pgEnum('sync_mode', ['BACKFILL', 'INCREMENTAL']);
 export const sapPurchaseOrderSync = pgTable(
   'sap_purchase_order_sync',
   {
-    // singleton — บังคับแถวเดียวด้วย CHECK ไม่ใช้ serial: เผลอ insert แถวสองแล้ว
-    // จะมี watermark สองค่า ตัวไหนจริงไม่มีใครรู้ แล้ว sync จะข้ามข้อมูลแบบเงียบ ๆ
-    id: smallint().primaryKey().notNull().default(1),
+    // ── หนึ่งแถวต่อหนึ่งบริษัท (0021) ────────────────────────────────────────
+    // เดิมเป็น singleton: id smallint PK default 1 + CHECK (id = 1) ซึ่งบังคับให้มี
+    // watermark ชุดเดียวทั้งระบบ — รองรับสองบริษัทไม่ได้เลยโดยโครงสร้าง
+    //
+    // เจตนาเดิมยังอยู่ครบ: PK เป็น companyCode ทำให้ยังมี watermark ได้แถวเดียว
+    // **ต่อบริษัท** เผลอ insert ซ้ำก็ชน PK เหมือนที่ CHECK เคยกันไว้
+    companyCode: varchar({ length: 20 }).primaryKey().notNull(),
 
     // ── ขอบหน้า: ตามของใหม่/ที่เพิ่งถูกแก้ใน SAP
     // ค่า OPOR.UpdateDate ล่าสุดที่ commit สำเร็จ — ไม่ใช่เวลาที่ job รัน
@@ -72,13 +75,22 @@ export const sapPurchaseOrderSync = pgTable(
 
     updatedAt: isoTimestamp().default(sql`now()`).notNull(),
   },
-  (table) => [check('ck_sap_purchase_order_sync_singleton', sql`${table.id} = 1`)],
+  (table) => [
+    foreignKey({
+      columns: [table.companyCode],
+      foreignColumns: [company.code],
+      name: 'fk_sap_purchase_order_sync_company',
+    }),
+  ],
 );
 
 export const sapPurchaseOrderSyncEvent = pgTable(
   'sap_purchase_order_sync_event',
   {
     id: serial().primaryKey().notNull(),
+    // รอบนี้เป็นของบริษัทไหน (0021) — ไม่มีคอลัมน์นี้จะไล่ประวัติแล้วแยกไม่ออก
+    // ว่ารอบไหนของใคร โดยเฉพาะตอนสองบริษัท sync สลับกันถี่ ๆ
+    companyCode: varchar({ length: 20 }).notNull(),
 
     // ปุ่มกับ scheduler เรียก engine ตัวเดียวกัน — เก็บไว้ว่ารอบนี้ใครสั่ง
     trigger: enumSyncTrigger().notNull(),
@@ -130,7 +142,8 @@ export const sapPurchaseOrderSyncEvent = pgTable(
 export const sapGrpoSync = pgTable(
   'sap_grpo_sync',
   {
-    id: smallint().primaryKey().notNull().default(1),
+    // หนึ่งแถวต่อบริษัท (0021) — เหตุผลเดียวกับ sapPurchaseOrderSync
+    companyCode: varchar({ length: 20 }).primaryKey().notNull(),
     // OPDN.UpdateDate — GRPO ต้องมี PO แม่อยู่ก่อนเสมอ เพราะ grpo_line ต้อง resolve
     // poItemId (uuid ฝั่ง AMS) จาก purchase_order_item ที่ sync มาแล้ว
     // ระหว่าง backfill ถอยหลัง GRPO เดือนนี้อาจอ้าง PO ที่ยังถอยไปไม่ถึง
@@ -144,13 +157,22 @@ export const sapGrpoSync = pgTable(
     lastError: text(),
     updatedAt: isoTimestamp().default(sql`now()`).notNull(),
   },
-  (table) => [check('ck_sap_grpo_sync_singleton', sql`${table.id} = 1`)],
+  (table) => [
+    foreignKey({
+      columns: [table.companyCode],
+      foreignColumns: [company.code],
+      name: 'fk_sap_grpo_sync_company',
+    }),
+  ],
 );
 
 export const sapGrpoSyncEvent = pgTable(
   'sap_grpo_sync_event',
   {
     id: serial().primaryKey().notNull(),
+    // รอบนี้เป็นของบริษัทไหน (0021) — ไม่มีคอลัมน์นี้จะไล่ประวัติแล้วแยกไม่ออก
+    // ว่ารอบไหนของใคร โดยเฉพาะตอนสองบริษัท sync สลับกันถี่ ๆ
+    companyCode: varchar({ length: 20 }).notNull(),
     trigger: enumSyncTrigger().notNull(),
     triggeredBy: integer(),
     mode: enumSyncMode().notNull(),
@@ -187,7 +209,8 @@ export const sapGrpoSyncEvent = pgTable(
 export const sapAssetSync = pgTable(
   'sap_asset_sync',
   {
-    id: smallint().primaryKey().notNull().default(1),
+    // หนึ่งแถวต่อบริษัท (0021) — เหตุผลเดียวกับ sapPurchaseOrderSync
+    companyCode: varchar({ length: 20 }).primaryKey().notNull(),
     // OITM.UpdateDate สูงสุดที่เห็น — เก็บไว้ให้หน้าจอบอกได้ว่า "ข้อมูลสดถึงเมื่อไหร่"
     // ไม่ได้ใช้ตัดหน้าต่างเหมือนสอง entity บน (ดึงเต็มทุกรอบอยู่แล้ว)
     lastUpdateDate: isoTimestamp(),
@@ -199,13 +222,22 @@ export const sapAssetSync = pgTable(
     lastError: text(),
     updatedAt: isoTimestamp().default(sql`now()`).notNull(),
   },
-  (table) => [check('ck_sap_asset_sync_singleton', sql`${table.id} = 1`)],
+  (table) => [
+    foreignKey({
+      columns: [table.companyCode],
+      foreignColumns: [company.code],
+      name: 'fk_sap_asset_sync_company',
+    }),
+  ],
 );
 
 export const sapAssetSyncEvent = pgTable(
   'sap_asset_sync_event',
   {
     id: serial().primaryKey().notNull(),
+    // รอบนี้เป็นของบริษัทไหน (0021) — ไม่มีคอลัมน์นี้จะไล่ประวัติแล้วแยกไม่ออก
+    // ว่ารอบไหนของใคร โดยเฉพาะตอนสองบริษัท sync สลับกันถี่ ๆ
+    companyCode: varchar({ length: 20 }).notNull(),
     trigger: enumSyncTrigger().notNull(),
     triggeredBy: integer(),
     mode: enumSyncMode().notNull(),
@@ -306,6 +338,9 @@ export const enumGrpoUnlinkReason = pgEnum('grpo_unlink_reason', [
 export const sapGrpoUnlinked = pgTable(
   'sap_grpo_unlinked',
   {
+    // บริษัทเจ้าของใบ (0021) — **ต้องอยู่ในคีย์** เพราะ DocEntry เป็นเลขภายในของแต่ละฐาน
+    // UBA กับ UBP เดินเลขของตัวเองอิสระกัน ไม่มี companyCode แล้วแถวของ UBP จะทับ UBA
+    companyCode: varchar({ length: 20 }).notNull(),
     grpoDocEntry: integer().notNull(),
     // LineNum ของ SAP เป็น 0-based และเก็บตามนั้น (หลักเดียวกับ purchase_order_item.poLine)
     grpoLineNum: integer().notNull(),
@@ -327,7 +362,15 @@ export const sapGrpoUnlinked = pgTable(
     lastSeenAt: isoTimestamp().default(sql`now()`).notNull(),
   },
   (table) => [
-    primaryKey({ columns: [table.grpoDocEntry, table.grpoLineNum], name: 'pk_sap_grpo_unlinked' }),
+    primaryKey({
+      columns: [table.companyCode, table.grpoDocEntry, table.grpoLineNum],
+      name: 'pk_sap_grpo_unlinked',
+    }),
+    foreignKey({
+      columns: [table.companyCode],
+      foreignColumns: [company.code],
+      name: 'fk_sap_grpo_unlinked_company',
+    }),
     // ทางเข้าหลัก: "ตอนนี้มีของหลุดเพราะเหตุไหนกี่ใบ"
     index('idx_sap_grpo_unlinked_reason').on(table.reason),
     index('idx_sap_grpo_unlinked_grpo_no').on(table.grpoNo),

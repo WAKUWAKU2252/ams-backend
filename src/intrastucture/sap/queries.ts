@@ -3,8 +3,8 @@
 // (ทุกคำสั่งเป็น SELECT ล้วน — ถ้ามีอย่างอื่นโผล่มาในไฟล์นี้แปลว่าผิดแล้ว)
 //
 // ตัวกรองสินทรัพย์อยู่ระดับ "บรรทัด" ไม่ใช่ระดับใบ: OPOR/OPDN ทั้งระบบมีหลักหมื่นใบ
-// แต่ที่เกี่ยวกับ AMS คือบรรทัดที่ item อยู่ในกลุ่มตาม SAP_ITEM_GROUPS เท่านั้น
-// (ปัจจุบัน 117 = fixed asset อย่างเดียว — ดูเหตุผลที่ถอด 114 ออกใน config/env.ts)
+// แต่ที่เกี่ยวกับ AMS คือบรรทัดที่ item อยู่ในกลุ่มตาม company.itemGroups ของบริษัทนั้น
+// (UBA = 117 · UBP = 110 — คนละผัง ห้ามรวมเป็นลิสต์เดียว ดู itemGroupList())
 // กรองที่ต้นทางทำให้ดึงมาน้อย เบาต่อ SAP และ ams_db ไม่บวมด้วยของที่ไม่ใช้
 //
 // หน้าต่างเวลาใช้ >= from และ < to (ครึ่งเปิด) เพื่อให้หน้าต่างที่ต่อกันไม่ทับซ้อน
@@ -13,17 +13,26 @@
 // ทำไมต่อรายการกลุ่มสินค้าลง SQL ตรง ๆ แทน STRING_SPLIT: ฟังก์ชันนั้นต้องการ
 // SQL Server 2016+ ที่ compatibility level >= 130 ซึ่ง SAP B1 หลายที่ตั้งต่ำกว่านั้น
 // แล้วจะพังด้วย "Invalid object name 'STRING_SPLIT'" — ปลอดภัยกว่าถ้าเราคุมค่าเอง
-// (ค่ามาจาก env ที่ schema บังคับ ^\d+(,\d+)*$ แล้ว และตรวจซ้ำใน itemGroupList())
+// (ค่ามาจาก company.itemGroups ซึ่ง itemGroupList() ตรวจว่าเป็นจำนวนเต็มก่อนต่อลง SQL)
 // ═══════════════════════════════════════════════════════════════════════════
-import { env } from '@config/env';
 import { purchasingCodeSqlFilter } from '@common/asset-number';
 
-/** แปลง env เป็นรายการตัวเลขที่ปลอดภัยพอจะต่อลง SQL — ไม่ผ่านการตรวจ = ไม่ยอมยิง */
-export function itemGroupList(): string {
-  const groups = env.SAP_ITEM_GROUPS.split(',')
+/**
+ * แปลงรายการกลุ่มสินค้าของบริษัทเป็นตัวเลขที่ปลอดภัยพอจะต่อลง SQL — ไม่ผ่านการตรวจ = ไม่ยอมยิง
+ *
+ * ค่ามาจาก company.itemGroups ไม่ใช่ env.SAP_ITEM_GROUPS อีกแล้ว (0021) เพราะเลขกลุ่มเป็น
+ * ผังของแต่ละบริษัท ไม่ได้แปลว่าอะไรร่วมกัน: UBA ใช้ 117 · UBP ใช้ 110 · และ UBP ไม่มี
+ * กลุ่ม 117 อยู่เลย ยิงรวมเป็นลิสต์เดียวข้ามฐานจึงได้ของผิดชุด
+ *
+ * ⚠️ ค่านี้ถูกต่อลง SQL ตรง ๆ — การตรวจว่าเป็นจำนวนเต็มคือกำแพงเดียวที่กัน injection
+ *    ห้ามถอดออกไม่ว่าต้นทางจะดู "เชื่อถือได้" แค่ไหน (ตอนนี้มาจาก DB ไม่ใช่ env แล้ว)
+ */
+export function itemGroupList(itemGroups: string | null): string {
+  const groups = (itemGroups ?? '')
+    .split(',')
     .map((s) => Number(s.trim()))
     .filter((n) => Number.isInteger(n) && n >= 0);
-  if (groups.length === 0) throw new Error('SAP_ITEM_GROUPS ไม่มีเลขกลุ่มสินค้าที่ใช้ได้');
+  if (groups.length === 0) throw new Error('company.itemGroups ไม่มีเลขกลุ่มสินค้าที่ใช้ได้');
   return groups.join(',');
 }
 
@@ -35,10 +44,15 @@ function docEntryList(docEntries: number[]): string {
 }
 
 // PO — หนึ่งแถวต่อ "บรรทัด PO" (header ซ้ำตามจำนวนบรรทัด แล้วไปยุบฝั่ง connector)
-export const poWindow = () => `
+export const poWindow = (itemGroups: string | null) => `
 SELECT
     po.DocEntry     AS docEntry,
     po.DocNum       AS docNum,
+    -- prefix ของ numbering series (NNM1.BeginStr) เช่น 'APO-' / 'PPO-' (0021)
+    -- connector ประกอบเป็นเลขเต็ม 'APO-62605007' ก่อนเขียนลง ams_db
+    -- LEFT ไม่ใช่ inner: series 'Primary' ที่ BeginStr เป็น NULL ยังมีอยู่ในตาราง
+    -- ถ้าใช้ inner ใบที่ใช้ series นั้นจะหายเงียบ
+    s.BeginStr      AS beginStr,
     po.CardName     AS vendorName,
     po.DocDate      AS docDate,
     po.OwnerCode    AS ownerCode,
@@ -57,8 +71,9 @@ SELECT
 FROM OPOR po
 JOIN POR1 p1 ON p1.DocEntry = po.DocEntry
 JOIN OITM i  ON i.ItemCode  = p1.ItemCode
-LEFT JOIN OHEM e ON e.empID = po.OwnerCode
-WHERE i.ItmsGrpCod IN (${itemGroupList()})
+LEFT JOIN OHEM e ON e.empID  = po.OwnerCode
+LEFT JOIN NNM1 s ON s.Series = po.Series AND s.ObjectCode = '22'
+WHERE i.ItmsGrpCod IN (${itemGroupList(itemGroups)})
   AND (@from IS NULL OR po.UpdateDate >= @from)
   AND (@to   IS NULL OR po.UpdateDate <  @to)
 ORDER BY po.UpdateDate, po.DocEntry, p1.LineNum;`;
@@ -66,10 +81,15 @@ ORDER BY po.UpdateDate, po.DocEntry, p1.LineNum;`;
 // PO ใบเดียวตาม DocEntry — ใช้ตอน sync GRPO แล้วเจอว่า PO แม่ยังไม่ถูกดึง
 // (ระหว่าง backfill ถอยหลัง GRPO เดือนนี้อ้าง PO ที่อาจอยู่ย้อนไปหลายเดือน
 //  ถ้ารอให้ backfill เดินไปถึงเอง grpo_line จะ insert ไม่ได้เพราะ FK)
-export const poByDocEntries = (docEntries: number[]) => `
+export const poByDocEntries = (itemGroups: string | null, docEntries: number[]) => `
 SELECT
     po.DocEntry     AS docEntry,
     po.DocNum       AS docNum,
+    -- prefix ของ numbering series (NNM1.BeginStr) เช่น 'APO-' / 'PPO-' (0021)
+    -- connector ประกอบเป็นเลขเต็ม 'APO-62605007' ก่อนเขียนลง ams_db
+    -- LEFT ไม่ใช่ inner: series 'Primary' ที่ BeginStr เป็น NULL ยังมีอยู่ในตาราง
+    -- ถ้าใช้ inner ใบที่ใช้ series นั้นจะหายเงียบ
+    s.BeginStr      AS beginStr,
     po.CardName     AS vendorName,
     po.DocDate      AS docDate,
     po.OwnerCode    AS ownerCode,
@@ -88,9 +108,10 @@ SELECT
 FROM OPOR po
 JOIN POR1 p1 ON p1.DocEntry = po.DocEntry
 JOIN OITM i  ON i.ItemCode  = p1.ItemCode
-LEFT JOIN OHEM e ON e.empID = po.OwnerCode
+LEFT JOIN OHEM e ON e.empID  = po.OwnerCode
+LEFT JOIN NNM1 s ON s.Series = po.Series AND s.ObjectCode = '22'
 WHERE po.DocEntry IN (${docEntryList(docEntries)})
-  AND i.ItmsGrpCod IN (${itemGroupList()})
+  AND i.ItmsGrpCod IN (${itemGroupList(itemGroups)})
 ORDER BY po.DocEntry, p1.LineNum;`;
 
 // GRPO — BaseType 22 = บรรทัดนี้ copy มาจาก PO; baseEntry/baseLine ชี้กลับบรรทัด PO ต้นทาง
@@ -112,10 +133,12 @@ ORDER BY po.DocEntry, p1.LineNum;`;
 //
 // ตัวกรอง ItmsGrpCod ยังอยู่ครบ — ของที่เพิ่มเข้ามาจึงจำกัดอยู่แค่บรรทัดกลุ่มสินทรัพย์
 // ที่ไม่มี PO ไม่ใช่ GRPO ทั้งบริษัท
-export const grpoWindow = () => `
+export const grpoWindow = (itemGroups: string | null) => `
 SELECT
     gr.DocEntry     AS docEntry,
     gr.DocNum       AS docNum,
+    -- prefix ของ GRPO เอง เช่น 'AGP-' / 'PGP-' (0021)
+    sg.BeginStr     AS beginStr,
     gr.DocDate      AS docDate,
     gr.UpdateDate   AS updateDate,
     d1.LineNum      AS lineNum,
@@ -125,24 +148,30 @@ SELECT
     d1.BaseType     AS baseType,
     d1.BaseEntry    AS baseEntry,
     d1.BaseLine     AS baseLine,
-    po.DocNum       AS basePoNumber
+    po.DocNum       AS basePoNumber,
+    -- ★ prefix ของ **PO แม่** ไม่ใช่ของ GRPO — ลืมตัวนี้แล้ว connector จะไปหา
+    -- '12608073' ในตารางที่เก็บ 'APO-12608073' → grpo_line ไม่เกิดสักแถว
+    -- และ sync จะรายงานว่าสำเร็จ ไม่มีอะไรฟ้อง
+    sp.BeginStr     AS basePoBeginStr
 FROM OPDN gr
 JOIN PDN1 d1 ON d1.DocEntry = gr.DocEntry
 JOIN OITM i  ON i.ItemCode  = d1.ItemCode
 LEFT JOIN OPOR po ON po.DocEntry = d1.BaseEntry
-WHERE i.ItmsGrpCod IN (${itemGroupList()})
+LEFT JOIN NNM1 sg ON sg.Series = gr.Series AND sg.ObjectCode = '20'
+LEFT JOIN NNM1 sp ON sp.Series = po.Series AND sp.ObjectCode = '22'
+WHERE i.ItmsGrpCod IN (${itemGroupList(itemGroups)})
   AND (@from IS NULL OR gr.UpdateDate >= @from)
   AND (@to   IS NULL OR gr.UpdateDate <  @to)
 ORDER BY gr.UpdateDate, gr.DocEntry, d1.LineNum;`;
 
 // จุดต่ำสุดของประวัติ — ถามครั้งเดียวตอนรอบแรกเพื่อรู้ว่า backfill ต้องถอยถึงไหนแล้วจบ
 // (ไม่รู้ค่านี้ = ไม่รู้ว่าเมื่อไหร่ควรเลิกถอย แล้วจะถอยไปเรื่อย ๆ ในอดีตที่ไม่มีข้อมูล)
-export const poMinUpdateDate = () => `
+export const poMinUpdateDate = (itemGroups: string | null) => `
 SELECT MIN(po.UpdateDate) AS minUpdateDate
 FROM OPOR po
 JOIN POR1 p1 ON p1.DocEntry = po.DocEntry
 JOIN OITM i  ON i.ItemCode  = p1.ItemCode
-WHERE i.ItmsGrpCod IN (${itemGroupList()});`;
+WHERE i.ItmsGrpCod IN (${itemGroupList(itemGroups)});`;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // สินทรัพย์เก่าที่มีอยู่ใน SAP ก่อน AMS — คนละเส้นทางกับ PO/GRPO โดยสิ้นเชิง
@@ -202,6 +231,25 @@ WHERE i.ItmsGrpCod IN (${itemGroupList()});`;
 //
 // UnDpAcc / SpDpAcc1-3 / WriteUpAcc / AppreAcc ดึงมาแต่ไม่มีที่เก็บ — ใช้ตรวจว่ายังเป็น 0
 // อยู่ทุกรอบ วันที่บัญชีตัดด้อยค่า/ตีราคาใหม่ ยอดสะสมที่เราเก็บจะต่ำกว่าจริงทันที
+//
+// ── ★ ACQ1 เข้ามาเพราะ ITM8.APC คือ "ยอดยกมาต้นปีบัญชี" ไม่ใช่ยอดปลายปี
+//
+// ปีที่ซื้อ APC จึงเป็น 0 เสมอ (ตอนต้นปีของยังไม่เข้ามา) ตัวรายการซื้อจริงอยู่ที่ ACQ1
+// แล้วมูลค่าถึงไปโผล่ใน ITM8 ปีถัดไป — ยืนยันกับ COM-100-05-002: ปี 2005 APC=0 /
+// ปี 2006 เป็นต้นไป APC=12,871.03 เท่ากับ ACQ1.LineTotal เป๊ะทุกปี
+//
+// ผลคือของที่เพิ่งซื้อในปีบัญชีปัจจุบันมีแถว ITM8 อยู่แถวเดียวคือแถวปีที่ซื้อ ซึ่ง APC = 0
+// (วัด 2026-08-24: 101 จาก 2,726 ชิ้นเป็นแบบนี้ ทั้ง 101 มีแถวเดียวจริง ไม่มีเคสตัดจำหน่าย
+//  ปนมาเลย และ 100 ชิ้นในนั้นมียอดจริงใน ACQ1) ถ้าไม่ดึง ACQ1 มาด้วย ของใหม่ทุกชิ้นจะ
+// เข้าระบบด้วยมูลค่า 0 โดยรอบ sync ยังขึ้น SUCCESS ตามปกติ ไม่มีอะไรฟ้อง
+//
+// ★ ต้อง GROUP BY ก่อน join ห้าม join ACQ1 ดิบ ๆ — 11 ชิ้นมีหลายบรรทัด (ซื้อเพิ่ม/ทยอยรับ)
+//   join ตรงเมื่อไหร่แถว ITM8 ทุกปีจะถูกคูณตามจำนวนบรรทัด แล้วยอดที่เห็นจะเป็นของ
+//   transaction เดียวไม่ใช่ยอดรวม (grain ของ latest/ITM7 ถูกคุมไว้ 1 แถวต่อ ItemCode
+//   ทั้งคู่แล้ว ตัวนี้เป็นตัวเดียวที่จะทำให้ผลบานถ้าปล่อยไว้)
+//
+// ส่งมาเป็นคอลัมน์แยก ไม่ COALESCE ที่นี่ — SQL ยังเป็นภาพตรง ๆ ของ SAP ส่วนกติกาว่า
+// เมื่อไหร่ควรถอยไปใช้ตัวไหนอยู่ที่ connector (หลักเดียวกับ DocStatus ที่ส่ง 'O'/'C' ดิบ)
 export const legacyAssetAll = () => `
 WITH latest AS (
     SELECT b.ItemCode, b.PeriodCat, b.APC, b.APCHist, b.OrDpAcc, b.SalvageVal,
@@ -209,6 +257,11 @@ WITH latest AS (
            ROW_NUMBER() OVER (PARTITION BY b.ItemCode ORDER BY b.PeriodCat DESC) AS rn
     FROM ITM8 b
     WHERE b.DprArea = '01 Posting'
+),
+acq AS (
+    SELECT a.ItemCode, SUM(ISNULL(a.LineTotal, 0)) AS acqPostedTotal
+    FROM ACQ1 a
+    GROUP BY a.ItemCode
 )
 SELECT
     i.ItemCode      AS assetNumber,
@@ -227,6 +280,9 @@ SELECT
     p1.LineTotal    AS acqCost,
     l.PeriodCat     AS fiscalYear,
     l.APC           AS bookedCost,
+    -- ยอดรวมรายการซื้อทั้งหมดที่เคยเกิดกับชิ้นนี้ — ใช้ถอยไปหาเมื่อ APC ยังเป็น 0
+    -- (ดูเหตุผลเต็มที่หัวคิวรี — คนละความหมายกับ APC ห้ามเอามาทับเมื่อ APC มีค่าแล้ว)
+    q.acqPostedTotal AS acquisitionPostedTotal,
     l.APCHist       AS bookedCostHistorical,
     l.OrDpAcc       AS accumulatedDepreciation,
     l.SalvageVal    AS salvageValue,
@@ -245,11 +301,21 @@ FROM OITM i
 LEFT JOIN PCH1 p1 ON p1.ItemCode = i.ItemCode
 LEFT JOIN OPCH ph ON ph.DocEntry = p1.DocEntry
 LEFT JOIN latest l  ON l.ItemCode = i.ItemCode AND l.rn = 1
+LEFT JOIN acq q     ON q.ItemCode = i.ItemCode
 LEFT JOIN ITM7 dp   ON dp.ItemCode = i.ItemCode
                    AND dp.DprArea = '01 Posting'
                    AND dp.PeriodCat = l.PeriodCat
-WHERE i.ItmsGrpCod IN (${itemGroupList()})
-  AND NOT (${purchasingCodeSqlFilter('i.ItemCode')})
+-- ★ ตัวกรองเปลี่ยนเป็นธง Fixed Asset ของ SAP ตรง ๆ (0021)
+--
+-- เดิม: ItmsGrpCod IN (...) AND NOT <ตัวเลขล้วน> ซึ่งผูกกับผังกลุ่มของแต่ละบริษัท
+-- (UBA 117 / UBP 110 — คนละเลขและ UBP ไม่มีกลุ่ม 117 เลย) และยังเดารูปทรงจาก ItemCode
+--
+-- ItemType = 'F' เป็นความหมาย ไม่ใช่ผัง จึงใช้ได้ทุกบริษัทโดยไม่ต้องส่ง itemGroups
+-- และเก็บของที่ตัวกรองเดิมมองไม่เห็นให้ด้วย (UBA มีสินทรัพย์ 5 ตัวอยู่กลุ่ม 100)
+--
+-- ⚠️ ใช้กับคิวรีนี้เท่านั้น — ฝั่ง PO/GRPO ห้ามใช้ เพราะบรรทัดเอกสารอ้าง "รหัสจัดซื้อ"
+--    ซึ่งเป็น ItemType = 'I' ทั้งหมด (UBA 5 ตัว / UBP 2 ตัว) เปลี่ยนแล้วจะ match ไม่ได้เลย
+WHERE i.ItemType = 'F'
 ORDER BY i.ItemCode, ph.DocDate;`;
 
 // ── รหัสจัดซื้อในกลุ่มเดียวกัน = ตัวเลขล้วน (มีอยู่ 5 ตัว วัด 2026-08-20)
@@ -271,23 +337,26 @@ ORDER BY i.ItemCode, ph.DocDate;`;
 //
 // จึงเอามาแค่สามช่องที่เป็นความจริงระดับหมวด: AssetClass / InvntryUom (+ ItemName ไว้ให้คน
 // อ่านตอนไล่ปัญหา) ใช้เติมชิ้นที่ยังไม่มีเลขสินทรัพย์เท่านั้น — ดู asset.connector.ts
-export const purchasingItemAll = () => `
+export const purchasingItemAll = (itemGroups: string | null) => `
 SELECT
     i.ItemCode      AS itemCode,
     i.ItemName      AS description,
     i.AssetClass    AS assetClass,
     i.InvntryUom    AS uom
 FROM OITM i
-WHERE i.ItmsGrpCod IN (${itemGroupList()})
+WHERE i.ItmsGrpCod IN (${itemGroupList(itemGroups)})
+  -- เงื่อนไขเสริมที่ตรงกับข้อมูลจริง: รหัสจัดซื้อเป็น ItemType = 'I' ทั้งหมด
+  -- (UBA 5/5 · UBP 2/2) กันของแปลกปนถ้าวันหลังมีคนตั้งรหัสตัวเลขล้วนเป็น 'F'
+  AND i.ItemType = 'I'
   AND ${purchasingCodeSqlFilter('i.ItemCode')}
 ORDER BY i.ItemCode;`;
 
 // ไม่มี BaseType ที่นี่โดยตั้งใจ — ขอบเขตต้องตรงกับ grpoWindow เป๊ะ ถ้ากรองแคบกว่าจะได้
 // MIN ที่ใหม่เกินจริง แล้ว backfill จะหยุดถอยก่อนเวลา ทำให้ GRPO แบบไม่มี PO ที่เก่ากว่านั้น
 // ไม่มีวันถูกเก็บ และไม่มีอะไรบอกด้วยว่าหยุดเร็วไป
-export const grpoMinUpdateDate = () => `
+export const grpoMinUpdateDate = (itemGroups: string | null) => `
 SELECT MIN(gr.UpdateDate) AS minUpdateDate
 FROM OPDN gr
 JOIN PDN1 d1 ON d1.DocEntry = gr.DocEntry
 JOIN OITM i  ON i.ItemCode  = d1.ItemCode
-WHERE i.ItmsGrpCod IN (${itemGroupList()});`;
+WHERE i.ItmsGrpCod IN (${itemGroupList(itemGroups)});`;

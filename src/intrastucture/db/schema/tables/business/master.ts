@@ -13,6 +13,7 @@
 import { pgTable, serial, varchar, integer, boolean, foreignKey, index, unique, type AnyPgColumn } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { isoTimestamp } from '@intrastucture/db/schema/shared/iso-timestamp';
+import { company } from './company';
 
 export const category = pgTable(
   'category',
@@ -158,10 +159,32 @@ export const employee = pgTable(
     // แยกสองคอลัมน์ตามที่ระบบ HR เก็บ ไม่รวบเป็นช่องเดียวเพื่อให้เรียงตามนามสกุลได้
     firstNameEn: varchar({ length: 100 }),
     lastNameEn: varchar({ length: 100 }),
-    // รหัสที่ SAP ใช้อ้างผู้ขอบนใบสั่งซื้อ (OPOR.OwnerCode = OHEM.empID)
-    // ตั้งชื่อตาม SAP ตรง ๆ เพื่อให้เห็นทันทีว่าคู่กับฟิลด์ไหน — sync ใช้ตัวนี้เชื่อมอย่างเดียว
-    // ว่างได้สำหรับพนักงานที่สร้างใน AMS เองและไม่มีใน SAP
-    ownerCode: integer(),
+    // ── รหัสที่ SAP ใช้อ้างผู้ขอบนใบสั่งซื้อ (OPOR.OwnerCode = OHEM.empID) ────────
+    //
+    // แยกเป็นสองคอลัมน์ตั้งแต่ 0021 เพราะ **OHEM มีอยู่ทั้งสองฐานและเดินเลขอิสระกัน**
+    // วัดจากของจริง: เลขชนกัน 264 ตัว (99% ของฝั่ง UBP) และ **คนคนเดียวอยู่ทั้งสองฐาน
+    // 247 คน** ในนั้น 165 คนได้เลขคนละตัว ส่วนอีก 82 คนบังเอิญได้เลขเดียวกัน
+    //
+    // 82 คนนั้นคือกับดัก: resolve โดยไม่ดูบริษัทจะ "ดูเหมือนถูก" 82 เคส เทสต์ผ่าน
+    // แล้วอีก 165 คนผูกผิดคนเงียบ ๆ → การ์ด Teams ขออนุมัติวิ่งไปหาหัวหน้าผิดคน
+    //
+    // ทำไมสองคอลัมน์ ไม่ใช่คอลัมน์เดียวพร้อมป้ายบริษัท: มี 71 คนที่เปิด PO ทั้งสองบริษัท
+    // (75% ของคนที่เปิด PO ฝั่ง UBP) เก็บเลขเดียวจะ resolve ได้แค่บริษัทเดียว
+    // ทำไมสองคอลัมน์ ไม่ใช่ตารางเชื่อม: มีแค่ 2 บริษัทที่ต่อ SAP (อีก 5 ไม่มีเลย)
+    // แลกกับต้องเพิ่มคอลัมน์ถ้ามีบริษัท SAP ตัวที่ 3 ซึ่งเป็นงานใหญ่อยู่แล้ว
+    //
+    // ทั้งคู่ว่างได้ — ว่างทั้งสองช่อง = พนักงานที่ไม่มีตัวตนใน SAP เลย
+    // (pg ยอมให้ NULL ซ้ำได้ใน unique จึงไม่บล็อกคนกลุ่มนี้)
+    ownerCodeUba: integer(),
+    ownerCodeUbp: integer(),
+    // บริษัทที่สังกัดตามระบบ HR — คนละเรื่องกับ ownerCode* ข้างบนซึ่งบอกว่า "มีตัวตน
+    // ใน OHEM ฐานไหนบ้าง" คน UBP ที่ถูกลงทะเบียนใน OHEM ของ UBA ด้วยมีอยู่จริงและเยอะ
+    //
+    // NULL ได้โดยตั้งใจ ไม่ใช่ "ลืมกรอก": ในไฟล์ employee.csv มี 52 คนที่ HR ไม่มีข้อมูล
+    // แล้ว (ไฟล์กำกับไว้เองว่า '(ไม่มีในไฟล์ HR)') เป็นพนักงานรุ่นเก่าที่ SAP ยังมีอยู่
+    // — เดาสังกัดให้พวกเขาคือการแต่งข้อมูล NULL บอกความจริงว่า "ไม่รู้"
+    // ไม่มีอะไรพึ่งพาคอลัมน์นี้ ใช้แค่แสดงผลกับกรองรายงาน การ resolve ใช้ ownerCode* เท่านั้น
+    companyCode: varchar({ length: 20 }),
     // รหัสพนักงานจากระบบ HR — เลขที่พนักงานรู้จักและใช้จริง คนละชุดกับ ownerCode
     // เก็บไว้แสดงผลและเชื่อมกับระบบ HR ในอนาคต ไม่ได้ใช้ในการ sync
     //
@@ -203,9 +226,22 @@ export const employee = pgTable(
     unique('uq_employee_email').on(table.email),
     // ต้องซ้ำไม่ได้ทั้งคู่ — เป็นตัวจับคู่กับระบบภายนอก ถ้าซ้ำจะ resolve ได้หลายคน
     // แล้ว ownerPrId จะชี้ไปผิดคนโดยไม่มีอะไรฟ้อง (pg ยอมให้ NULL ซ้ำได้)
-    unique('uq_employee_owner_code').on(table.ownerCode),
+    //
+    // unique แยกกันคนละคอลัมน์ ไม่ใช่ unique(companyCode, ownerCode) รวม — เลข 42 ของ
+    // UBA กับ 42 ของ UBP อยู่คนละช่องจึงไม่ชนกันเองอยู่แล้ว และคนคนเดียวถือได้ทั้งสองเลข
+    unique('uq_employee_owner_code_uba').on(table.ownerCodeUba),
+    unique('uq_employee_owner_code_ubp').on(table.ownerCodeUbp),
     unique('uq_employee_emp_id').on(table.empId),
-    // ทางเข้าหลักของ sync: เอา OwnerCode มาหา employee.id
-    index('idx_employee_owner_code').on(table.ownerCode),
+    // ทางเข้าหลักของ sync: เอา OwnerCode + บริษัทของใบ PO มาหา employee.id
+    // (unique ข้างบนสร้าง index ให้อยู่แล้ว แต่คงไว้ให้ชัดว่าเป็นทางเข้าที่ตั้งใจ)
+    index('idx_employee_owner_code_uba').on(table.ownerCodeUba),
+    index('idx_employee_owner_code_ubp').on(table.ownerCodeUbp),
+    // สังกัดตาม HR — ไม่ cascade, ไม่ notNull (ดูเหตุผลที่คอลัมน์)
+    foreignKey({
+      columns: [table.companyCode],
+      foreignColumns: [company.code],
+      name: 'fk_employee_company',
+    }),
+    index('idx_employee_company_code').on(table.companyCode),
   ],
 );

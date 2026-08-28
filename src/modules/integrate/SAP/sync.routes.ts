@@ -13,10 +13,21 @@ const triggerRoutes = new Elysia()
   // เรียกซ้อนสองครั้งจะกลายเป็น AND: hook ตัวที่สองโยน 403 ทิ้งทุกคนที่ผ่านตัวแรกมา
   // ซึ่งไม่มีทางผ่านได้เลยเพราะ user หนึ่งคนมี role เดียว
   .use(requireRole('FINANCE', 'ADMIN'))
+  // ทุกบริษัท ทุก entity — ผลคืนเป็น { [companyCode]: { purchase_order, grpo, asset } }
   .post('/', ({ currentUser }) => syncService.syncAll('BUTTON', currentUser.id))
-  .post('/:entity', ({ params, currentUser }) => syncService.syncOne(params.entity, 'BUTTON', currentUser.id), {
-    params: t.Object({ entity: t.String() }),
-  });
+  // ทุก entity ของบริษัทเดียว (0021)
+  .post(
+    '/company/:company',
+    ({ params, currentUser }) => syncService.syncAllForCompany(params.company, 'BUTTON', currentUser.id),
+    { params: t.Object({ company: t.String() }) },
+  )
+  // entity เดียวของบริษัทเดียว — บริษัทมาก่อนใน path เพราะเป็นขอบเขตที่กว้างกว่า
+  .post(
+    '/company/:company/:entity',
+    ({ params, currentUser }) =>
+      syncService.syncOne(params.entity, params.company, 'BUTTON', currentUser.id),
+    { params: t.Object({ company: t.String(), entity: t.String() }) },
+  );
 
 export const syncRoutes = new Elysia({ prefix: '/sync' })
   .use(authGuard)

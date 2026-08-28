@@ -19,8 +19,18 @@ const base = () => env.APP_BASE_URL.replace(/\/+$/, '');
  * กล้องของ iOS/Android อ่าน URL แล้วเปิดหน้าให้ทันทีโดยไม่ต้องมีแอป ถ้าเก็บเป็นเลขเปล่า
  * กล้องจะขึ้นแค่ข้อความให้ก๊อป แล้วต้องเปิดแอปไปวางเองอีกที
  */
-export function assetQrUrl(assetNumber: string): string {
-  return `${base()}/assets/${encodeURIComponent(assetNumber)}`;
+/**
+ * ★ ต้องมีรหัสบริษัทใน URL (0021) — เลขสินทรัพย์ซ้ำกันข้ามบริษัทจริง 24 ตัว
+ *
+ * ไม่ใส่แล้วจะพังสองชั้นพร้อมกัน:
+ *   1. qrCode ของสองชิ้นนั้นกลายเป็นสตริงเดียวกัน → uq_asset_qr_code ปฏิเสธ
+ *      ตอน import ของ UBP เข้ามา (24 แถว insert ไม่ได้)
+ *   2. ต่อให้ผ่าน DB มาได้ การสแกนก็ตอบไม่ได้ว่าหมายถึงชิ้นของบริษัทไหน
+ *
+ * บริษัทอยู่ใน path ไม่ใช่ query เพราะเป็นส่วนหนึ่งของ "ตัวตนของชิ้น" ไม่ใช่ตัวกรอง
+ */
+export function assetQrUrl(companyCode: string, assetNumber: string): string {
+  return `${base()}/assets/${encodeURIComponent(companyCode)}/${encodeURIComponent(assetNumber)}`;
 }
 
 /**

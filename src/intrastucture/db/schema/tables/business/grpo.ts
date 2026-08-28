@@ -8,12 +8,18 @@ import { sql } from 'drizzle-orm';
 import { isoTimestamp } from '@intrastucture/db/schema/shared/iso-timestamp';
 import { attachment, enumDocType } from './attachment';
 import { purchaseOrderItem } from './purchase';
+import { company } from './company';
 
 export const grpo = pgTable(
   'grpo',
   {
     id: serial().primaryKey().notNull(),
+    // เลขเต็มพร้อม prefix เช่น 'AGP-12608073' / 'PGP-12608073' (0021) — เหตุผลเดียวกับ
+    // purchase_order.poNumber: UBA กับ UBP เดินเลขในช่วง 1YYMMNNN เดียวกันเป๊ะ
     grpoNo: varchar({ length: 50 }).notNull(),
+    companyCode: varchar({ length: 20 }).notNull(),
+    // OPDN.DocEntry — ตัวตนจริงฝั่ง SAP (sap_grpo_unlinked ใช้หลักเดียวกันอยู่แล้ว)
+    docEntry: integer(),
     grpoDate: date().notNull(),
     // ข้อมูล SAP sync — timestamp ให้สาวได้ว่าแถวเข้า/แก้เมื่อไหร่ (Finding #11)
     createdAt: isoTimestamp().default(sql`now()`).notNull(),
@@ -21,8 +27,16 @@ export const grpo = pgTable(
     // invoice ย้ายไปตาราง grpo_invoice แล้ว (many-to-many) — เดิม invoiceId เป็นคอลัมน์เดียว
   },
   (table) => [
-    // เลข GRPO จาก SAP ห้ามซ้ำทั้งระบบ — บังคับได้เพราะขึ้นมาอยู่ระดับ header แล้ว
+    // เลข GRPO ห้ามซ้ำทั้งระบบ — ยังเป็น single-column ได้เพราะเลขมี prefix แล้ว
+    // ('AGP-12608073' กับ 'PGP-12608073' ต่างกันที่ prefix ทั้งที่ DocNum เท่ากัน)
     uniqueIndex('uq_grpo_no').on(table.grpoNo),
+    foreignKey({
+      columns: [table.companyCode],
+      foreignColumns: [company.code],
+      name: 'fk_grpo_company',
+    }),
+    index('idx_grpo_company_code').on(table.companyCode),
+    unique('uq_grpo_doc_entry').on(table.companyCode, table.docEntry),
   ],
 );
 

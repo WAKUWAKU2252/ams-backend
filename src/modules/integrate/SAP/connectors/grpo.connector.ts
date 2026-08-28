@@ -32,10 +32,13 @@ import { emptyResult } from '@/modules/integrate/SAP/sync.engine';
 import { requireRow } from '@common/db-result';
 import { toIso, toDateOnly, toNum, toStr, maxIso, chunk, nowIso } from '@/modules/integrate/SAP/sync.util';
 import { fetchPoByDocEntries, applyPoRows, type PoRow } from './po.connector';
+import { docKey, lockKeyFor } from '@/modules/integrate/SAP/company.util';
 
 type GrpoRow = {
   docEntry: number;
   docNum: number;
+  /** NNM1.BeginStr ของ GRPO ใบนี้ เช่น 'AGP-' */
+  beginStr: string | null;
   docDate: Date | null;
   updateDate: Date | null;
   lineNum: number;
@@ -49,6 +52,12 @@ type GrpoRow = {
   baseEntry: number | null;
   baseLine: number | null;
   basePoNumber: number | null;
+  /**
+   * ★ BeginStr ของ **PO แม่** ไม่ใช่ของ GRPO — คนละ series คนละ ObjectCode
+   * ใช้ประกอบเลข PO เพื่อไปหา purchase_order_item ที่เก็บเลขพร้อม prefix ไว้แล้ว
+   * ผิดตัวนี้ = resolve ไม่เจอทั้งชุด และ sync จะรายงานว่าสำเร็จโดยไม่มี grpo_line เกิดเลย
+   */
+  basePoBeginStr: string | null;
 };
 
 /** ก้อนที่ fetch ส่งต่อให้ apply — GRPO พร้อม PO แม่ที่ต้องเขียนลงไปก่อน */
@@ -109,13 +118,20 @@ async function resolvePoItemIds(
  * firstSeenAt ไม่อยู่ใน set ของ onConflictDoUpdate โดยตั้งใจ — ต้องคงค่าเดิมไว้
  * ไม่งั้นทุกรอบจะรีเซ็ตเป็นวันนี้ แล้วคำถาม "ของชิ้นนี้ค้างมานานแค่ไหน" จะตอบไม่ได้
  */
-async function syncUnlinked(tx: Tx, resolved: GrpoRow[], stillUnlinked: GrpoRow[]): Promise<void> {
+async function syncUnlinked(
+  tx: Tx,
+  companyCode: string,
+  resolved: GrpoRow[],
+  stillUnlinked: GrpoRow[],
+): Promise<void> {
   // ลบด้วย tuple (DocEntry, LineNum) ทีละคู่ — ใช้ IN สองชั้นแยกกันไม่ได้เพราะจะกลายเป็น
   // cross product แล้วลบแถวที่ไม่เกี่ยวข้องทิ้ง (เช่น 9002#1 โดนลบเพราะมี 9002#0 กับ 9003#1)
   for (const part of chunk(resolved, LOOKUP_CHUNK)) {
+    // ★ tuple ต้องมี companyCode ด้วย — DocEntry เป็นเลขภายในของแต่ละฐาน
+    //   ไม่ scope แล้วจะไปลบแถวของอีกบริษัทที่ DocEntry บังเอิญตรงกัน
     await tx.delete(sapGrpoUnlinked).where(
-      sql`(${sapGrpoUnlinked.grpoDocEntry}, ${sapGrpoUnlinked.grpoLineNum}) IN (${sql.join(
-        part.map((r) => sql`(${r.docEntry}, ${r.lineNum})`),
+      sql`(${sapGrpoUnlinked.companyCode}, ${sapGrpoUnlinked.grpoDocEntry}, ${sapGrpoUnlinked.grpoLineNum}) IN (${sql.join(
+        part.map((r) => sql`(${companyCode}, ${r.docEntry}, ${r.lineNum})`),
         sql`, `,
       )})`,
     );
@@ -126,21 +142,22 @@ async function syncUnlinked(tx: Tx, resolved: GrpoRow[], stillUnlinked: GrpoRow[
       .insert(sapGrpoUnlinked)
       .values(
         part.map((r) => ({
+          companyCode,
           grpoDocEntry: r.docEntry,
           grpoLineNum: r.lineNum,
-          grpoNo: String(r.docNum),
+          grpoNo: docKey(r.beginStr, r.docNum),
           grpoDate: toDateOnly(r.docDate),
           itemCode: toStr(r.itemCode),
           itemDescription: toStr(r.itemDescription),
           receivedQty: toNum(r.receivedQty),
-          basePoNumber: r.basePoNumber == null ? null : String(r.basePoNumber),
+          basePoNumber: r.basePoNumber == null ? null : docKey(r.basePoBeginStr, r.basePoNumber),
           baseLine: r.baseLine,
           reason: unlinkReason(r),
           sapUpdateDate: toIso(r.updateDate),
         })),
       )
       .onConflictDoUpdate({
-        target: [sapGrpoUnlinked.grpoDocEntry, sapGrpoUnlinked.grpoLineNum],
+        target: [sapGrpoUnlinked.companyCode, sapGrpoUnlinked.grpoDocEntry, sapGrpoUnlinked.grpoLineNum],
         set: {
           grpoNo: sql`excluded."grpoNo"`,
           grpoDate: sql`excluded."grpoDate"`,
@@ -158,16 +175,154 @@ async function syncUnlinked(tx: Tx, resolved: GrpoRow[], stillUnlinked: GrpoRow[
   }
 }
 
-// เหตุผลเดียวกับฝั่ง po.connector — ไม่ cast แต่ให้ requireRow ตรวจจริง
-const readState = (rows: (typeof sapGrpoSync.$inferSelect)[]): SyncState =>
-  requireRow(rows, 'อ่าน sap_grpo_sync (id=1)');
+/**
+ * เขียน GRPO ลง ams_db
+ *
+ * แยกออกมาเป็นฟังก์ชันเดี่ยวตอนทำหลายบริษัท (0021) เพราะตัว connector กลายเป็น factory
+ * ที่ผูก companyCode ไว้แล้ว — ตัว apply จึงต้องรับ companyCode เข้ามาตรง ๆ
+ */
+async function applyGrpoBatch(tx: Tx, companyCode: string, { rows, parentPo }: GrpoBatch): Promise<PullResult> {
+  if (rows.length === 0) return emptyResult();
 
-export const grpoConnector: SyncConnector<GrpoBatch> = {
-  entity: 'grpo',
-  lockKey: 811002,
+  // PO แม่ต้องลงก่อนเสมอ ไม่งั้น grpo_line ชี้ไปหา uuid ที่ยังไม่มี
+  await applyPoRows(tx, companyCode, parentPo);
+
+  const poNumbers = [...new Set(rows.filter(linkable).map((r) => docKey(r.basePoBeginStr, r.basePoNumber)))];
+  const poItemIds = poNumbers.length > 0 ? await resolvePoItemIds(tx, poNumbers) : new Map<string, string>();
+
+  // ── คัดแยกเป็นสองกอง พร้อมยุบซ้ำระดับบรรทัด SAP ในรอบเดียว
+  //
+  // ต้องยุบซ้ำตรงนี้เพราะหน้าต่างสองก้อนอาจคาบเกี่ยวกันจนได้บรรทัดเดิมมาสองครั้ง
+  // ถ้าปล่อยไว้ ฝั่ง linked จะบวกจำนวนเกินจริง และฝั่ง unlinked จะทำให้ upsert
+  // ชุดเดียวมี key ซ้ำจน pg ปฏิเสธทั้งคำสั่ง
+  //
+  // กองที่ resolve ไม่ได้ = ตัดถาวร ไม่ใช่คิวที่รอได้ เพราะ PO แม่ที่ยังไม่ถูก sync
+  // ถูกดึงมาเขียนไปแล้วที่บรรทัดบน (applyPoRows) ก่อนจะมาถึงตรงนี้
+  const linked = new Map<string, GrpoRow>();
+  const unlinked = new Map<string, GrpoRow>();
+  for (const r of rows) {
+    const k = sapLineKey(r);
+    if (linked.has(k) || unlinked.has(k)) continue;
+    const poItemId = linkable(r)
+      ? poItemIds.get(keyOf(docKey(r.basePoBeginStr, r.basePoNumber), r.baseLine))
+      : undefined;
+    if (poItemId) linked.set(k, r);
+    else unlinked.set(k, r);
+  }
+
+  // watermark ต้องคิดจาก rows ทั้งหมด ไม่ใช่แค่ที่เขียนสำเร็จ — ไม่งั้นรอบที่มีแต่ของ
+  // ที่เชื่อมไม่ได้จะไม่เลื่อน watermark แล้ววนดึงช่วงเดิมซ้ำตลอดไป
+  const maxUpdateDate = maxIso(rows.map((r) => toIso(r.updateDate)));
+
+  await syncUnlinked(tx, companyCode, [...linked.values()], [...unlinked.values()]);
+
+  const skipped = unlinked.size;
+  if (linked.size === 0) return { ...emptyResult(), rowsSkipped: skipped, maxUpdateDate };
+
+  // ── header (ยุบซ้ำก่อน — SAP คืนหนึ่งแถวต่อบรรทัด)
+  const headers = new Map<string, GrpoRow>();
+  for (const r of linked.values()) headers.set(docKey(r.beginStr, r.docNum), r);
+
+  // grpo.id เป็น serial ฝั่ง AMS — อ่าน id ของใบที่มีอยู่แล้ว "ก่อน" เขียน (เดิมอ่านหลัง)
+  // นอกจากใช้ผูก line แล้ว ยังเป็นตัวแยกว่าใบไหนใหม่ใบไหนเก่า
+  const grpoIds = new Map<string, number>();
+  for (const part of chunk([...headers.keys()], LOOKUP_CHUNK)) {
+    const found = await tx
+      .select({ id: grpo.id, grpoNo: grpo.grpoNo })
+      .from(grpo)
+      .where(inArray(grpo.grpoNo, part));
+    for (const r of found) grpoIds.set(r.grpoNo, r.id);
+  }
+
+  const headerRows = [...headers.values()].map((r) => ({
+    grpoNo: docKey(r.beginStr, r.docNum),
+    companyCode,
+    docEntry: r.docEntry,
+    // grpoDate เป็น NOT NULL — SAP ไม่เคยปล่อยว่าง แต่กันไว้ด้วย UpdateDate
+    grpoDate: toDateOnly(r.docDate) ?? toDateOnly(r.updateDate) ?? nowIso().slice(0, 10),
+  }));
+
+  // ── แยกทางเขียนสองสาย ด้วยเหตุผลเดียวกับ asset.connector:
+  // INSERT ... ON CONFLICT ดึงค่า default ของทุกแถวที่เสนอเข้าไปก่อนจะรู้ว่าชน แปลว่า
+  // grpo_id_seq ถูกกินทุกแถวทุกรอบ sync ทั้งที่ส่วนใหญ่เป็นใบเดิม (ตอนตรวจพบ seq อยู่ที่
+  // 256 ทั้งที่มีใบจริง 154 ใบ) — ของเดิมจึงต้องเป็น UPDATE ที่ไม่แตะ default ของ id
+  const toInsert = headerRows.filter((h) => !grpoIds.has(h.grpoNo));
+  const toUpdate = headerRows.filter((h) => grpoIds.has(h.grpoNo));
+
+  for (const part of chunk(toInsert, INSERT_CHUNK)) {
+    // onConflictDoUpdate เหลือไว้เป็นตาข่ายกันใบที่โผล่มาระหว่างที่เราอ่านกับตอนเขียน
+    // returning ทำให้ไม่ต้องวนอ่าน id กลับอีกรอบ (ได้ทั้งเส้น insert และเส้นที่ชน)
+    const written = await tx
+      .insert(grpo)
+      .values(part)
+      .onConflictDoUpdate({
+        target: grpo.grpoNo,
+        set: {
+          grpoDate: sql`excluded."grpoDate"`,
+          docEntry: sql`excluded."docEntry"`,
+          updatedAt: sql`now()`,
+        },
+      })
+      .returning({ id: grpo.id, grpoNo: grpo.grpoNo });
+    for (const r of written) grpoIds.set(r.grpoNo, r.id);
+  }
+
+  for (const part of chunk(toUpdate, INSERT_CHUNK)) {
+    // cast ชนิดกำกับทุกค่า — parameter ที่ส่งเข้า VALUES เป็น unknown ฝั่ง pg
+    const rows = part.map((h) => sql`(${h.grpoNo}::varchar, ${h.grpoDate}::date, ${h.docEntry}::integer)`);
+    await tx.execute(sql`
+      UPDATE ${grpo} AS g
+         SET "grpoDate" = v."grpoDate", "docEntry" = v."docEntry", "updatedAt" = now()
+      FROM (VALUES ${sql.join(rows, sql`, `)}) AS v("grpoNo", "grpoDate", "docEntry")
+      WHERE g."grpoNo" = v."grpoNo"
+    `);
+  }
+
+  // ── line: ยุบเป็นระดับ (รอบรับ × po line) ตามที่ตาราง grpo_line นิยามไว้
+  // GRPO ใบเดียวอาจมีหลายบรรทัดที่อ้าง PO บรรทัดเดียวกัน (แยกตาม bin/serial ฝั่ง SAP)
+  // ซึ่งของเราถือเป็นการรับรอบเดียวกัน → รวมจำนวน ไม่ใช่ทับกันเอง
+  // (การกันแถวซ้ำข้ามหน้าต่างทำไปแล้วตอนคัดแยก linked/unlinked ข้างบน)
+  const lines = new Map<string, { grpoId: number; poItemId: string; receivedQty: number }>();
+  for (const r of linked.values()) {
+    const grpoId = grpoIds.get(docKey(r.beginStr, r.docNum));
+    const poItemId = linkable(r)
+      ? poItemIds.get(keyOf(docKey(r.basePoBeginStr, r.basePoNumber), r.baseLine))
+      : undefined;
+    if (grpoId == null || poItemId == null) continue;
+
+    const k = `${grpoId}#${poItemId}`;
+    const prev = lines.get(k);
+    if (prev) prev.receivedQty += toNum(r.receivedQty);
+    else lines.set(k, { grpoId, poItemId, receivedQty: toNum(r.receivedQty) });
+  }
+
+  for (const part of chunk([...lines.values()], INSERT_CHUNK)) {
+    await tx
+      .insert(grpoLine)
+      .values(part)
+      .onConflictDoUpdate({
+        target: [grpoLine.grpoId, grpoLine.poItemId],
+        set: { receivedQty: sql`excluded."receivedQty"`, updatedAt: sql`now()` },
+      });
+  }
+
+  return { rowsHeader: headers.size, rowsLine: lines.size, rowsSkipped: skipped, maxUpdateDate };
+}
+
+// เหตุผลเดียวกับฝั่ง po.connector — ไม่ cast แต่ให้ requireRow ตรวจจริง
+const readState = (rows: (typeof sapGrpoSync.$inferSelect)[], companyCode: string): SyncState =>
+  requireRow(rows, `อ่าน sap_grpo_sync (companyCode=${companyCode})`);
+
+/** base ของ advisory lock สำหรับ entity นี้ — ผสมกับบริษัทด้วย lockKeyFor() */
+const LOCK_BASE = 811002;
+
+/** สร้าง connector ที่ผูกกับบริษัทหนึ่ง (0021) — ดูเหตุผลเต็มที่ makePoConnector */
+export const makeGrpoConnector = (companyCode: string, itemGroups: string | null): SyncConnector<GrpoBatch> => ({
+  entity: `grpo:${companyCode}`,
+  lockKey: lockKeyFor(LOCK_BASE, companyCode),
 
   async fetchFloor() {
-    const [row] = await sapQuery<{ minUpdateDate: Date | null }>(grpoMinUpdateDate(), {});
+    const [row] = await sapQuery<{ minUpdateDate: Date | null }>(companyCode, grpoMinUpdateDate(itemGroups), {});
     return toIso(row?.minUpdateDate);
   },
 
@@ -175,7 +330,7 @@ export const grpoConnector: SyncConnector<GrpoBatch> = {
     const rows: GrpoRow[] = [];
     for (const w of windows) {
       rows.push(
-        ...(await sapQuery<GrpoRow>(grpoWindow(), {
+        ...(await sapQuery<GrpoRow>(companyCode, grpoWindow(itemGroups), {
           from: asDateTime(w.from),
           to: asDateTime(w.to),
         })),
@@ -188,150 +343,36 @@ export const grpoConnector: SyncConnector<GrpoBatch> = {
     // คิดเฉพาะแถวที่ผูกได้จริง — แถว BaseType ≠ 22 มี BaseEntry เป็น -1 ซึ่งเอาไปดึงไม่ได้
     // (docEntryList กรองเลขติดลบทิ้ง แล้วถ้าเหลือศูนย์ตัวจะโยน error กลางรอบ sync)
     const linkableRows = rows.filter(linkable);
-    const poNumbers = [...new Set(linkableRows.map((r) => String(r.basePoNumber)))];
+    const poNumbers = [...new Set(linkableRows.map((r) => docKey(r.basePoBeginStr, r.basePoNumber)))];
     const existing = poNumbers.length > 0 ? await resolvePoItemIds(db, poNumbers) : new Map<string, string>();
     const missing = [
       ...new Set(
-        linkableRows.filter((r) => !existing.has(keyOf(String(r.basePoNumber), r.baseLine))).map((r) => r.baseEntry),
+        linkableRows
+          .filter((r) => !existing.has(keyOf(docKey(r.basePoBeginStr, r.basePoNumber), r.baseLine)))
+          .map((r) => r.baseEntry),
       ),
       // กัน DocEntry ที่ใช้ไม่ได้หลุดเข้าไป: docEntryList จะกรองเลขติดลบทิ้งแล้วโยน error
       // ถ้าเหลือศูนย์ตัว ซึ่งจะทำให้ทั้งรอบพังเพราะแถวเดียวที่ข้อมูลเพี้ยน
     ].filter((n) => Number.isInteger(n) && n > 0);
-    const parentPo = await fetchPoByDocEntries(missing);
+    const parentPo = await fetchPoByDocEntries(companyCode, itemGroups, missing);
 
     return { rows, parentPo };
   },
 
-  async apply(tx, { rows, parentPo }) {
-    if (rows.length === 0) return emptyResult();
-
-    // PO แม่ต้องลงก่อนเสมอ ไม่งั้น grpo_line ชี้ไปหา uuid ที่ยังไม่มี
-    await applyPoRows(tx, parentPo);
-
-    const poNumbers = [...new Set(rows.filter(linkable).map((r) => String(r.basePoNumber)))];
-    const poItemIds = poNumbers.length > 0 ? await resolvePoItemIds(tx, poNumbers) : new Map<string, string>();
-
-    // ── คัดแยกเป็นสองกอง พร้อมยุบซ้ำระดับบรรทัด SAP ในรอบเดียว
-    //
-    // ต้องยุบซ้ำตรงนี้เพราะหน้าต่างสองก้อนอาจคาบเกี่ยวกันจนได้บรรทัดเดิมมาสองครั้ง
-    // ถ้าปล่อยไว้ ฝั่ง linked จะบวกจำนวนเกินจริง และฝั่ง unlinked จะทำให้ upsert
-    // ชุดเดียวมี key ซ้ำจน pg ปฏิเสธทั้งคำสั่ง
-    //
-    // กองที่ resolve ไม่ได้ = ตัดถาวร ไม่ใช่คิวที่รอได้ เพราะ PO แม่ที่ยังไม่ถูก sync
-    // ถูกดึงมาเขียนไปแล้วที่บรรทัดบน (applyPoRows) ก่อนจะมาถึงตรงนี้
-    const linked = new Map<string, GrpoRow>();
-    const unlinked = new Map<string, GrpoRow>();
-    for (const r of rows) {
-      const k = sapLineKey(r);
-      if (linked.has(k) || unlinked.has(k)) continue;
-      const poItemId = linkable(r) ? poItemIds.get(keyOf(String(r.basePoNumber), r.baseLine)) : undefined;
-      if (poItemId) linked.set(k, r);
-      else unlinked.set(k, r);
-    }
-
-    // watermark ต้องคิดจาก rows ทั้งหมด ไม่ใช่แค่ที่เขียนสำเร็จ — ไม่งั้นรอบที่มีแต่ของ
-    // ที่เชื่อมไม่ได้จะไม่เลื่อน watermark แล้ววนดึงช่วงเดิมซ้ำตลอดไป
-    const maxUpdateDate = maxIso(rows.map((r) => toIso(r.updateDate)));
-
-    await syncUnlinked(tx, [...linked.values()], [...unlinked.values()]);
-
-    const skipped = unlinked.size;
-    if (linked.size === 0) return { ...emptyResult(), rowsSkipped: skipped, maxUpdateDate };
-
-    // ── header (ยุบซ้ำก่อน — SAP คืนหนึ่งแถวต่อบรรทัด)
-    const headers = new Map<string, GrpoRow>();
-    for (const r of linked.values()) headers.set(String(r.docNum), r);
-
-    // grpo.id เป็น serial ฝั่ง AMS — อ่าน id ของใบที่มีอยู่แล้ว "ก่อน" เขียน (เดิมอ่านหลัง)
-    // นอกจากใช้ผูก line แล้ว ยังเป็นตัวแยกว่าใบไหนใหม่ใบไหนเก่า
-    const grpoIds = new Map<string, number>();
-    for (const part of chunk([...headers.keys()], LOOKUP_CHUNK)) {
-      const found = await tx
-        .select({ id: grpo.id, grpoNo: grpo.grpoNo })
-        .from(grpo)
-        .where(inArray(grpo.grpoNo, part));
-      for (const r of found) grpoIds.set(r.grpoNo, r.id);
-    }
-
-    const headerRows = [...headers.values()].map((r) => ({
-      grpoNo: String(r.docNum),
-      // grpoDate เป็น NOT NULL — SAP ไม่เคยปล่อยว่าง แต่กันไว้ด้วย UpdateDate
-      grpoDate: toDateOnly(r.docDate) ?? toDateOnly(r.updateDate) ?? nowIso().slice(0, 10),
-    }));
-
-    // ── แยกทางเขียนสองสาย ด้วยเหตุผลเดียวกับ asset.connector:
-    // INSERT ... ON CONFLICT ดึงค่า default ของทุกแถวที่เสนอเข้าไปก่อนจะรู้ว่าชน แปลว่า
-    // grpo_id_seq ถูกกินทุกแถวทุกรอบ sync ทั้งที่ส่วนใหญ่เป็นใบเดิม (ตอนตรวจพบ seq อยู่ที่
-    // 256 ทั้งที่มีใบจริง 154 ใบ) — ของเดิมจึงต้องเป็น UPDATE ที่ไม่แตะ default ของ id
-    const toInsert = headerRows.filter((h) => !grpoIds.has(h.grpoNo));
-    const toUpdate = headerRows.filter((h) => grpoIds.has(h.grpoNo));
-
-    for (const part of chunk(toInsert, INSERT_CHUNK)) {
-      // onConflictDoUpdate เหลือไว้เป็นตาข่ายกันใบที่โผล่มาระหว่างที่เราอ่านกับตอนเขียน
-      // returning ทำให้ไม่ต้องวนอ่าน id กลับอีกรอบ (ได้ทั้งเส้น insert และเส้นที่ชน)
-      const written = await tx
-        .insert(grpo)
-        .values(part)
-        .onConflictDoUpdate({
-          target: grpo.grpoNo,
-          set: { grpoDate: sql`excluded."grpoDate"`, updatedAt: sql`now()` },
-        })
-        .returning({ id: grpo.id, grpoNo: grpo.grpoNo });
-      for (const r of written) grpoIds.set(r.grpoNo, r.id);
-    }
-
-    for (const part of chunk(toUpdate, INSERT_CHUNK)) {
-      // cast ชนิดกำกับทุกค่า — parameter ที่ส่งเข้า VALUES เป็น unknown ฝั่ง pg
-      const rows = part.map((h) => sql`(${h.grpoNo}::varchar, ${h.grpoDate}::date)`);
-      await tx.execute(sql`
-        UPDATE ${grpo} AS g SET "grpoDate" = v."grpoDate", "updatedAt" = now()
-        FROM (VALUES ${sql.join(rows, sql`, `)}) AS v("grpoNo", "grpoDate")
-        WHERE g."grpoNo" = v."grpoNo"
-      `);
-    }
-
-    // ── line: ยุบเป็นระดับ (รอบรับ × po line) ตามที่ตาราง grpo_line นิยามไว้
-    // GRPO ใบเดียวอาจมีหลายบรรทัดที่อ้าง PO บรรทัดเดียวกัน (แยกตาม bin/serial ฝั่ง SAP)
-    // ซึ่งของเราถือเป็นการรับรอบเดียวกัน → รวมจำนวน ไม่ใช่ทับกันเอง
-    // (การกันแถวซ้ำข้ามหน้าต่างทำไปแล้วตอนคัดแยก linked/unlinked ข้างบน)
-    const lines = new Map<string, { grpoId: number; poItemId: string; receivedQty: number }>();
-    for (const r of linked.values()) {
-      const grpoId = grpoIds.get(String(r.docNum));
-      const poItemId = linkable(r) ? poItemIds.get(keyOf(String(r.basePoNumber), r.baseLine)) : undefined;
-      if (grpoId == null || poItemId == null) continue;
-
-      const k = `${grpoId}#${poItemId}`;
-      const prev = lines.get(k);
-      if (prev) prev.receivedQty += toNum(r.receivedQty);
-      else lines.set(k, { grpoId, poItemId, receivedQty: toNum(r.receivedQty) });
-    }
-
-    for (const part of chunk([...lines.values()], INSERT_CHUNK)) {
-      await tx
-        .insert(grpoLine)
-        .values(part)
-        .onConflictDoUpdate({
-          target: [grpoLine.grpoId, grpoLine.poItemId],
-          set: { receivedQty: sql`excluded."receivedQty"`, updatedAt: sql`now()` },
-        });
-    }
-
-    return { rowsHeader: headers.size, rowsLine: lines.size, rowsSkipped: skipped, maxUpdateDate };
-  },
+  apply: (tx, batch) => applyGrpoBatch(tx, companyCode, batch),
 
   async readState(tx) {
-    const rows = await tx.select().from(sapGrpoSync).where(eq(sapGrpoSync.id, 1));
-    return readState(rows);
+    const rows = await tx.select().from(sapGrpoSync).where(eq(sapGrpoSync.companyCode, companyCode));
+    return readState(rows, companyCode);
   },
 
   async readStateOutsideTx() {
-    const rows = await db.select().from(sapGrpoSync).where(eq(sapGrpoSync.id, 1));
-    // แถวแรกสุดของระบบ — สร้างให้ตอนใช้จริงครั้งแรก จะได้ไม่ต้องมี seed แยกที่ลืมรัน
+    const rows = await db.select().from(sapGrpoSync).where(eq(sapGrpoSync.companyCode, companyCode));
     if (rows.length === 0) {
-      const created = await db.insert(sapGrpoSync).values({ id: 1 }).returning();
-      return readState(created);
+      const created = await db.insert(sapGrpoSync).values({ companyCode }).returning();
+      return readState(created, companyCode);
     }
-    return readState(rows);
+    return readState(rows, companyCode);
   },
 
   async writeState(tx, patch) {
@@ -339,14 +380,14 @@ export const grpoConnector: SyncConnector<GrpoBatch> = {
     await tx
       .update(sapGrpoSync)
       .set({ ...patch, lastRunAt: now, updatedAt: now })
-      .where(eq(sapGrpoSync.id, 1));
+      .where(eq(sapGrpoSync.companyCode, companyCode));
   },
 
   async openEvent(tx, row) {
     const created = requireRow(
       await tx
         .insert(sapGrpoSyncEvent)
-        .values({ ...row, status: 'RUNNING' })
+        .values({ ...row, companyCode, status: 'RUNNING' })
         .returning({ id: sapGrpoSyncEvent.id }),
       'open sap_grpo_sync_event',
     );
@@ -363,6 +404,7 @@ export const grpoConnector: SyncConnector<GrpoBatch> = {
   async logFailure(row) {
     const now = nowIso();
     await db.insert(sapGrpoSyncEvent).values({
+      companyCode,
       trigger: row.trigger,
       triggeredBy: row.triggeredBy,
       mode: row.mode,
@@ -374,6 +416,6 @@ export const grpoConnector: SyncConnector<GrpoBatch> = {
     await db
       .update(sapGrpoSync)
       .set({ lastStatus: 'FAILED', lastError: row.error, lastRunAt: now, updatedAt: now })
-      .where(eq(sapGrpoSync.id, 1));
+      .where(eq(sapGrpoSync.companyCode, companyCode));
   },
-};
+});

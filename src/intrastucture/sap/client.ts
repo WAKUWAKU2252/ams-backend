@@ -6,14 +6,25 @@
 //
 // pool แยกจาก ams_db คนละตัว — คนละเครื่อง คนละ driver และ SAP เป็น DB จริงของ
 // บริษัทที่ระบบอื่นใช้อยู่ ต้องจำกัดจำนวน connection ไม่ให้ไปเบียดคนอื่น
+//
+// ── หลายบริษัท (0021) ──────────────────────────────────────────────────────
+// หนึ่งบริษัท = หนึ่งฐาน SAP = หนึ่ง pool — ชื่อฐานอ่านจากตาราง company ไม่ใช่ env
+// เพราะ env มีช่องเดียวและการเพิ่มบริษัทควรเป็นการ INSERT ไม่ใช่การ deploy ใหม่
+// (credential ยังมาจาก .env ชุดเดียว — สองฐานอยู่ SQL Server instance เดียวกัน)
+//
+// ⚠️ pool.max เป็น "ต่อฐาน" ไม่ใช่ต่อ process — สองบริษัทจึงไม่แย่ง connection กันเอง
+//    แต่แปลว่าเพดานรวมคือ max × จำนวนบริษัท ระวังตอนเพิ่มบริษัทที่สาม
 // ═══════════════════════════════════════════════════════════════════════════
 import sql from 'mssql';
 import { env } from '@config/env';
+import { eq, isNotNull, and } from 'drizzle-orm';
+import { db } from '@intrastucture/db';
+import { company } from '@intrastucture/db/schema';
 
-const config: sql.config = {
+const configFor = (database: string): sql.config => ({
   server: env.SAP_DB_HOST,
   port: env.SAP_DB_PORT,
-  database: env.SAP_DB_NAME,
+  database,
   user: env.SAP_DB_USERNAME,
   password: env.SAP_DB_PASSWORD,
   options: {
@@ -35,21 +46,65 @@ const config: sql.config = {
   connectionTimeout: 15_000,
   // หน้าต่าง backfill หนึ่งก้อนอาจกินหลายพันแถว — ให้เวลามากกว่า connect
   requestTimeout: 120_000,
-};
+});
 
 // lazy: ไม่ต่อ SAP ตอนแอปสตาร์ท เพราะ SAP ล่มไม่ควรทำให้ AMS สตาร์ทไม่ขึ้น
 // (ทั้งระบบออกแบบให้ทำงานต่อได้จาก snapshot เดิมเมื่อ SAP ใช้ไม่ได้)
-let poolPromise: Promise<sql.ConnectionPool> | null = null;
+//
+// key = company.code — ไม่ใช่ชื่อฐาน เพราะ caller รู้จักบริษัท ไม่ควรต้องรู้ว่าฐานชื่ออะไร
+const pools = new Map<string, Promise<sql.ConnectionPool>>();
 
-function getPool(): Promise<sql.ConnectionPool> {
-  if (!poolPromise) {
-    poolPromise = new sql.ConnectionPool(config).connect().catch((e) => {
+/**
+ * ชื่อฐาน SAP ของบริษัทนี้ — อ่านจาก company.sapDbName แล้ว cache ไว้
+ *
+ * cache ตลอดอายุ process โดยตั้งใจ: ค่านี้เปลี่ยนแค่ตอนย้ายเซิร์ฟเวอร์ ซึ่งต้อง restart
+ * อยู่แล้ว การไป SELECT ทุกครั้งที่ยิงคิวรีคือเพิ่ม round trip ให้ทุกหน้าต่าง backfill
+ */
+const dbNameCache = new Map<string, string>();
+
+async function resolveDbName(companyCode: string): Promise<string> {
+  const cached = dbNameCache.get(companyCode);
+  if (cached) return cached;
+
+  const [row] = await db
+    .select({ sapDbName: company.sapDbName })
+    .from(company)
+    .where(and(eq(company.code, companyCode), isNotNull(company.sapDbName)))
+    .limit(1);
+
+  // ไม่มีแถว = พิมพ์รหัสผิด / บริษัทนี้ไม่มี SAP (sapDbName เป็น NULL)
+  // โยนทิ้งดีกว่าถอยไปใช้ค่า default: ถอยแล้วจะยิงเข้าฐานผิดบริษัทแบบเงียบสนิท
+  if (!row?.sapDbName) {
+    throw new Error(`บริษัท '${companyCode}' ไม่มี sapDbName ในตาราง company — ยิง SAP ไม่ได้`);
+  }
+
+  dbNameCache.set(companyCode, row.sapDbName);
+  return row.sapDbName;
+}
+
+function getPool(companyCode: string): Promise<sql.ConnectionPool> {
+  const existing = pools.get(companyCode);
+  if (existing) return existing;
+
+  const p = resolveDbName(companyCode)
+    .then((database) => new sql.ConnectionPool(configFor(database)).connect())
+    .catch((e) => {
       // ปล่อยให้ครั้งหน้าลองใหม่ได้ ไม่งั้น pool ที่ต่อพลาดครั้งเดียวจะค้างตลอดอายุ process
-      poolPromise = null;
+      pools.delete(companyCode);
       throw e;
     });
-  }
-  return poolPromise;
+
+  pools.set(companyCode, p);
+  return p;
+}
+
+/** บริษัทที่มีฐาน SAP ให้ sync — sync service วนตามรายการนี้ */
+export async function sapCompanies(): Promise<string[]> {
+  const rows = await db
+    .select({ code: company.code })
+    .from(company)
+    .where(and(isNotNull(company.sapDbName), eq(company.isActive, true)));
+  return rows.map((r) => r.code);
 }
 
 /**
@@ -114,10 +169,13 @@ const isTyped = (v: SapParam): v is ReturnType<typeof asDateTime> =>
  * ที่คนทั้งบริษัทใช้อยู่ ไม่ควรจับล็อกค้างไว้จนคนโพสต์เอกสารไม่ได้
  */
 export async function sapQuery<T = Record<string, unknown>>(
+  // บริษัทมาก่อน query โดยตั้งใจ — ลืมใส่แล้ว TS ฟ้องทันที ต่างจากการเป็นพารามิเตอร์
+  // ตัวสุดท้ายแบบ optional ซึ่งจะยิงเข้าฐาน default เงียบ ๆ
+  companyCode: string,
   query: string,
   params: Record<string, SapParam> = {},
 ): Promise<T[]> {
-  const pool = await getPool();
+  const pool = await getPool(companyCode);
   const request = pool.request();
   for (const [key, param] of Object.entries(params)) {
     if (isTyped(param)) request.input(key, sql.DateTime, param.value);
@@ -128,9 +186,15 @@ export async function sapQuery<T = Record<string, unknown>>(
   return result.recordset;
 }
 
+/** ปิดทุก pool — เรียกตอน shutdown เท่านั้น (ปิดทีละบริษัทไม่มีเคสใช้จริง) */
 export async function closeSap(): Promise<void> {
-  if (!poolPromise) return;
-  const pool = await poolPromise.catch(() => null);
-  poolPromise = null;
-  await pool?.close();
+  const all = [...pools.values()];
+  pools.clear();
+  dbNameCache.clear();
+  await Promise.all(
+    all.map(async (p) => {
+      const pool = await p.catch(() => null);
+      await pool?.close();
+    }),
+  );
 }
