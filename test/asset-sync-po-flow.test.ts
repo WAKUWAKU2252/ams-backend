@@ -23,7 +23,7 @@ import {
   sapAssetUnknownNumber,
 } from '@intrastucture/db/schema';
 import type { Tx } from '@modules/integrate/SAP/sync.types';
-import { makeEmployee, makePo, makeGrpo, makeRequest, makeUser, resetDb } from './helpers/factory';
+import { makeEmployee, makePo, makeGrpo, makeRequest, makeUser, resetDb, TEST_COMPANY } from './helpers/factory';
 import { assetQrUrl } from '@common/app-url';
 
 // ── ปิดประตู SAP ก่อน import connector
@@ -42,7 +42,9 @@ mock.module('@intrastucture/sap/client', () => ({
   },
 }));
 
-const { assetConnector } = await import('@modules/integrate/SAP/connectors/asset.connector');
+// connector เป็น factory ตั้งแต่ 0021 — ผูกกับบริษัทก่อนใช้
+const { makeAssetConnector } = await import('@modules/integrate/SAP/connectors/asset.connector');
+const assetConnector = makeAssetConnector(TEST_COMPANY, '117');
 type LegacyAssetPull = Parameters<typeof assetConnector.apply>[1];
 type LegacyAssetRow = LegacyAssetPull['assets'][number];
 type PurchasingItemRow = LegacyAssetPull['purchasing'][number];
@@ -75,6 +77,7 @@ function sapRow(over: Partial<LegacyAssetRow> = {}): LegacyAssetRow {
     vendor: null,
     invoiceNo: null,
     acqCost: null,
+    acquisitionPostedTotal: null,
     // ชุดบัญชีมาในคิวรีเดียวกันแล้ว — ไฟล์นี้ไม่ได้ทดสอบส่วนนั้น ปล่อยว่างทั้งชุด
     // (ทดสอบแยกที่ asset-accounting-sync.test.ts)
     ...NO_ACCOUNTING,
@@ -151,7 +154,7 @@ async function seedMasters() {
     sapLocationId: 42,
   });
   const sapEmployeeId = await makeEmployee({ departmentId: sapDept!.id });
-  await db.update(employee).set({ ownerCode: 999 }).where(eq(employee.id, sapEmployeeId));
+  await db.update(employee).set({ ownerCodeUba: 999 }).where(eq(employee.id, sapEmployeeId));
 }
 
 /** สินทรัพย์หนึ่งชิ้นที่ลงทะเบียนผ่าน AMS ครบโซ่ PO (ck_asset_origin_chain บังคับทั้งชุด) */
@@ -191,6 +194,7 @@ async function makePoFlowAsset(
     .insert(asset)
     .values({
       origin: 'PO_FLOW',
+      companyCode: TEST_COMPANY,
       requestId,
       grpoLineId,
       poItemId,
@@ -476,7 +480,7 @@ describe('เลขที่ไม่เข้าสคีมาบริษั�
     const row = await db.query.asset.findFirst({
       where: eq(asset.assetNumber, 'MAC-212-13-001/1'),
     });
-    expect(row!.qrCode).toBe(assetQrUrl('MAC-212-13-001/1'));
+    expect(row!.qrCode).toBe(assetQrUrl(TEST_COMPANY, 'MAC-212-13-001/1'));
     expect(row!.qrCode).toContain('MAC-212-13-001%2F1');
   });
 
@@ -502,7 +506,7 @@ describe('QR ของสินทรัพย์ที่ sync มาจาก 
     await assetConnector.apply(tx, pull([sapRow()]));
 
     const row = await db.query.asset.findFirst({ where: eq(asset.assetNumber, ASSET_NO) });
-    expect(row!.qrCode).toBe(assetQrUrl(ASSET_NO));
+    expect(row!.qrCode).toBe(assetQrUrl(TEST_COMPANY, ASSET_NO));
   });
 
   test('ของเดิมที่ยังไม่มี QR ต้องถูกเติมให้ในรอบถัดไป', async () => {
@@ -513,7 +517,7 @@ describe('QR ของสินทรัพย์ที่ sync มาจาก 
     await assetConnector.apply(tx, pull([sapRow()]));
 
     const row = await db.query.asset.findFirst({ where: eq(asset.assetNumber, ASSET_NO) });
-    expect(row!.qrCode).toBe(assetQrUrl(ASSET_NO));
+    expect(row!.qrCode).toBe(assetQrUrl(TEST_COMPANY, ASSET_NO));
   });
 
   test('QR ค่าเก่าที่ไม่ตรง config ต้องถูกทับให้ตรงปัจจุบัน', async () => {
@@ -529,7 +533,7 @@ describe('QR ของสินทรัพย์ที่ sync มาจาก 
     await assetConnector.apply(tx, pull([sapRow()]));
 
     const row = await db.query.asset.findFirst({ where: eq(asset.assetNumber, ASSET_NO) });
-    expect(row!.qrCode).toBe(assetQrUrl(ASSET_NO));
+    expect(row!.qrCode).toBe(assetQrUrl(TEST_COMPANY, ASSET_NO));
   });
 
   test('แถว PO_FLOW ไม่ถูกแตะ — QR ของมันเกิดตอนบัญชีออกเลขให้', async () => {

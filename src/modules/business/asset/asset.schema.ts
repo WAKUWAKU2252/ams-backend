@@ -27,6 +27,44 @@ export const assetInventoryQuery = t.Composite([
     // ค้นเลขสินทรัพย์ / รายละเอียด / เลขเครื่อง — คนจำได้ไม่เหมือนกัน
     search: t.Optional(t.String({ maxLength: 100 })),
     departmentId: t.Optional(t.Numeric({ minimum: 1 })),
+    // รหัสบริษัท (company.code) — ไม่ส่ง = ทุกบริษัท ความยาวตรงกับ varchar(20)
+    // ไม่เช็คว่ามีจริงเหมือน /dashboard/overview: ที่นี่เป็นตัวกรองของตารางค้นหา
+    // รหัสมั่วได้ผลลัพธ์ว่างซึ่งอ่านถูกอยู่แล้ว ไม่ต้องจ่ายค่า query ตาราง company ทุกครั้ง
+    companyCode: t.Optional(t.String({ minLength: 1, maxLength: 20 })),
+
+    // ── ตัวกรองของหน้าทะเบียน ───────────────────────────────────────────────
+    locationId: t.Optional(t.Numeric({ minimum: 1 })),
+
+    // ต้องเป็น union ของค่าจริงใน enum asset_status ไม่ใช่ t.String()
+    // ส่งค่านอก enum เข้าไปเทียบ Postgres จะโยน 22P02 (invalid input value for enum)
+    // ซึ่งกลายเป็น 500 ทั้งที่เป็นแค่ query ที่พิมพ์ผิด — ให้ตกที่ประตูนี้เป็น 422 แทน
+    status: t.Optional(
+      t.Union([
+        t.Literal('Active'),
+        t.Literal('Inactive'),
+        t.Literal('Under Maintenance'),
+        t.Literal('Lost'),
+        t.Literal('Disposed'),
+      ]),
+    ),
+
+    /**
+     * ปีบัญชีของตัวเลขที่ sync มา (asset_accounting.fiscalYear) — ไม่ใช่ปีที่ซื้อ
+     *
+     * ★ ชิ้นที่ยังไม่มีแถวบัญชีจะหลุดออกจากผลเมื่อกรองด้วยตัวนี้ ซึ่งถูกแล้ว:
+     *   "ขอชิ้นที่ตัวเลขเป็นของปี 2022" กับ "ชิ้นที่ไม่มีตัวเลขเลย" คนละคำถาม
+     */
+    fiscalYear: t.Optional(t.Numeric({ minimum: 1900, maximum: 3000 })),
+
+    /**
+     * ช่วงมูลค่าคงเหลือ — คิดจาก bookedCost − accumulatedDepreciation ตอนคิวรี
+     * (ไม่มีคอลัมน์ NBV เก็บไว้ ดูหัวไฟล์ของตาราง asset_accounting)
+     *
+     * ★ ชิ้นที่ SAP ให้ตัวเลขมาไม่ครบจะหลุดออกจากผลเช่นกัน เพราะเทียบค่าไม่ได้
+     *   ติดลบได้จริง (ของที่ตัดค่าเสื่อมเกินราคาทุน) จึงไม่ตั้ง minimum ไว้
+     */
+    minNetBookValue: t.Optional(t.Numeric()),
+    maxNetBookValue: t.Optional(t.Numeric()),
   }),
 ]);
 
@@ -103,5 +141,9 @@ export const updateAssetBody = t.Object({
 // กรอกชื่อสินค้าลงช่อง ItemCode) ถ้าบังคับ ASSET_NUMBER_REGEX ที่นี่ สติกเกอร์ของเจ็ดชิ้นนั้น
 // จะสแกนแล้วขึ้น 422 ทั้งที่ของมีอยู่จริงในระบบ — ปล่อยให้ service ตอบ 404 ถ้าหาไม่เจอพอ
 export const assetByNumberQuery = t.Object({
+  // ★ ต้องระบุบริษัท (0021) — ไม่ใช่เรื่องสิทธิ์ แต่เป็นเรื่องความกำกวม:
+  //   เลขสินทรัพย์ซ้ำกันข้ามบริษัทจริง 24 ตัว เลขเปล่าจึงตอบได้สองชิ้น
+  //   ค่านี้มาจาก URL ที่ QR ฝังไว้ให้แล้ว (ดู assetQrUrl)
+  company: t.String({ minLength: 1, maxLength: 20 }),
   number: t.String({ minLength: 1, maxLength: 100 }),
 });

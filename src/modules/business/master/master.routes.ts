@@ -27,4 +27,6 @@ export const masterRoutes = new Elysia({ prefix: '/master' })
   // เส้นเดียวที่แบ่งหน้า — employee ใหญ่ระดับทั้งบริษัท ตัวอื่นคืนครบเพราะหลักสิบแถว
   .get('/employees', ({ query }) => masterService.findEmployees(query), {
     query: employeeListQuery,
-  });
+  })
+  // ปีบัญชีที่มีอยู่จริงในทะเบียน — ไม่มี query เพราะไม่มีอะไรให้ค้น/กรอง คืนครบทีเดียว
+  .get('/fiscal-years', () => masterService.findFiscalYears());

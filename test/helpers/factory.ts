@@ -21,9 +21,13 @@ export async function resetDb() {
   // lock อยู่ใน RAM ไม่ใช่ DB — TRUNCATE ไม่แตะมัน ต้องล้างเองไม่งั้นห้องของเทสต์ก่อนหน้า
   // ค้างมาชนกับ requestId ที่เริ่มนับใหม่จาก 1
   presence.resetRooms();
+  // company ไม่ถูกล้าง (0021) — เป็นข้อมูลอ้างอิงที่ migration 0021 seed ไว้ ไม่ใช่ของเทสต์
+  // ล้างแล้วทุก FK ที่ชี้มา (purchase_order/grpo/asset/employee/sync) จะ insert ไม่ได้เลย
+  // และการ seed ใหม่เองในเทสต์คือการทำสำเนากติกาไว้สองที่ซึ่งจะเพี้ยนจาก migration วันหลัง
   const rows = await db.execute<{ tablename: string }>(sql`
     SELECT tablename FROM pg_tables
-    WHERE schemaname = 'public' AND tablename <> '__drizzle_migrations'
+    WHERE schemaname = 'public'
+      AND tablename NOT IN ('__drizzle_migrations', 'company')
   `);
   const names = rows.rows.map((r) => `"${r.tablename}"`).join(', ');
   await db.execute(sql.raw(`TRUNCATE ${names} RESTART IDENTITY CASCADE`));
@@ -109,15 +113,23 @@ export interface PoItemSpec {
   description?: string;
 }
 
+/**
+ * บริษัทที่เทสต์ใช้เป็นค่าตั้งต้น — migration 0021 seed 7 บริษัทไว้แล้ว จึงมีแถวนี้แน่นอน
+ * เทสต์ที่ต้องพิสูจน์เรื่องข้ามบริษัทให้ส่ง companyCode เข้ามาเองเป็น 'UBP'
+ */
+export const TEST_COMPANY = 'UBA';
+
+
 /** PO 1 ใบ + บรรทัดตามที่ระบุ — คืน id ของแต่ละบรรทัดเรียงตามที่ส่งเข้ามา */
 export async function makePo(
   poNumber: string,
   items: PoItemSpec[],
-  opts: { ownerPrId?: number } = {},
+  opts: { ownerPrId?: number; companyCode?: string } = {},
 ) {
+  const companyCode = opts.companyCode ?? TEST_COMPANY;
   await db
     .insert(purchaseOrder)
-    .values({ poNumber, vendorName: 'ผู้ขายทดสอบ', ownerPrId: opts.ownerPrId });
+    .values({ poNumber, companyCode, vendorName: 'ผู้ขายทดสอบ', ownerPrId: opts.ownerPrId });
   const rows = await db
     .insert(purchaseOrderItem)
     .values(
@@ -135,8 +147,13 @@ export async function makePo(
 }
 
 /** รอบรับของ 1 รอบ ที่รับของจาก PO line เดียว */
-export async function makeGrpo(grpoNo: string, poItemId: string, receivedQty: number) {
-  const [g] = await db.insert(grpo).values({ grpoNo, grpoDate: '2026-08-01' }).returning();
+export async function makeGrpo(
+  grpoNo: string,
+  poItemId: string,
+  receivedQty: number,
+  companyCode: string = TEST_COMPANY,
+) {
+  const [g] = await db.insert(grpo).values({ grpoNo, companyCode, grpoDate: '2026-08-01' }).returning();
   const [l] = await db.insert(grpoLine).values({ grpoId: g!.id, poItemId, receivedQty }).returning();
   return { grpoId: g!.id, grpoLineId: l!.id, grpoNo };
 }

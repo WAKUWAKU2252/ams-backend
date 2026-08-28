@@ -9,6 +9,7 @@ import {
   max,
   notInArray,
   or,
+  sql,
   type SQL,
 } from 'drizzle-orm';
 import { db } from '@intrastucture/db';
@@ -25,6 +26,7 @@ import {
   department,
   employee,
   user,
+  purchaseOrder,
 } from '@intrastucture/db/schema';
 import { NotFoundError, BadRequestError, ConflictError } from '@common/errors';
 import { requireRow, requireScalar } from '@common/db-result';
@@ -244,6 +246,10 @@ export async function create(body: CreateBody, userId: number): Promise<AssetRow
       // ของทุกคอลัมน์ในโซ่ PO ไว้กับค่านี้ ปล่อยให้ default เงียบ ๆ ทำให้อ่านตรงนี้แล้วไม่เห็น
       // ว่าทำไม requestId/grpoLineId ถึงห้ามว่าง
       origin: 'PO_FLOW',
+      // บริษัทเจ้าของชิ้นนี้ (0021) — เอาจากรอบรับของ ไม่ใช่จาก user ที่กดหรือค่า default
+      // GRPO คือจุดที่ของเข้าบริษัทจริง และ grpo.companyCode มาจากฐาน SAP ที่ sync มา
+      // ตรง ๆ จึงโกหกไม่ได้ (ไต่ผ่าน line.poItem ก็ได้ผลเดียวกัน แต่ต้อง join เพิ่ม)
+      companyCode: line.grpo.companyCode,
       requestId: body.requestId,
       grpoLineId: body.grpoLineId,
       poItemId: line.poItemId,
@@ -858,6 +864,7 @@ export async function findMine(userId: number): Promise<MyAssetsResponse> {
   const rows = await db
     .select({
       id: asset.id,
+      companyCode: asset.companyCode,
       assetNumber: asset.assetNumber,
       description: asset.description,
       imageId: asset.imageId,
@@ -903,6 +910,7 @@ export async function findMine(userId: number): Promise<MyAssetsResponse> {
     linkedToEmployee: true,
     items: rows.map((r) => ({
       id: r.id,
+      companyCode: r.companyCode,
       assetNumber: r.assetNumber,
       description: r.description,
       imageId: r.imageId,
@@ -975,12 +983,22 @@ function toMyAssetAccounting(a: AccountingColumns | null): MyAssetAccounting | n
  *   ส่วนข้อมูลระบุตัวของ (เลข/ชื่อ/ที่ตั้ง/ผู้ดูแล) ปล่อยได้ — มันอยู่บนตัวเครื่องให้เห็นอยู่แล้ว
  *   และเป็นสิ่งเดียวที่ทำให้สแกนแล้วมีประโยชน์
  */
-export async function findByAssetNumber(assetNumber: string): Promise<AssetByNumberDetail> {
+export async function findByAssetNumber(
+  assetNumber: string,
+  companyCode: string,
+): Promise<AssetByNumberDetail> {
   const number = assetNumber.trim();
   if (!number) throw new BadRequestError('ต้องระบุเลขสินทรัพย์');
 
   const row = await db.query.asset.findFirst({
-    where: and(eq(asset.assetNumber, number), isNull(asset.deletedAt)),
+    // ★ ต้องระบุบริษัท ไม่ใช่เรื่องสิทธิ์แต่เป็นเรื่องความกำกวม: เลขสินทรัพย์ซ้ำกัน
+    //   ข้ามบริษัทจริง 24 ตัว (วัดจาก OITM) — เลขเปล่าจึงตอบได้สองชิ้น
+    //   บริษัทมาจาก URL ของ QR ซึ่ง assetQrUrl ฝังไว้ให้แล้ว
+    where: and(
+      eq(asset.assetNumber, number),
+      eq(asset.companyCode, companyCode),
+      isNull(asset.deletedAt),
+    ),
     with: {
       category: true,
       location: true,
@@ -1015,6 +1033,8 @@ export async function findByAssetNumber(assetNumber: string): Promise<AssetByNum
     holderName: row.employee ? employeeName(row.employee) : null,
     acquisitionDate: row.acquisitionDate,
     acquisitionCost: row.acquisitionCost,
+    warrantyStartDate: row.warrantyStartDate,
+    warrantyEndDate: row.warrantyEndDate,
     accounting: toMyAssetAccounting(accounting ?? null),
   };
 }
@@ -1046,10 +1066,29 @@ export async function findInventory(input: InventoryListInput): Promise<Paginate
       )
     : undefined;
 
+  /**
+   * มูลค่าคงเหลือ — คิดสดตอนคิวรี ไม่มีคอลัมน์เก็บไว้
+   *
+   * ★ ช่องไหนเป็น NULL ผลลัพธ์เป็น NULL แล้วการเทียบทุกแบบให้ NULL ซึ่งไม่ผ่าน WHERE
+   *   แปลว่าชิ้นที่ SAP ให้ตัวเลขมาไม่ครบจะหลุดออกจากผลเองโดยไม่ต้องเขียนเงื่อนไขเพิ่ม
+   *   — ตั้งใจให้เป็นแบบนั้น เพราะ "อยู่ในช่วง 0–5000" ตอบไม่ได้ถ้าไม่รู้ว่าเท่าไร
+   */
+  const netBookValue = sql`(${assetAccounting.bookedCost} - ${assetAccounting.accumulatedDepreciation})`;
+
   const where = and(
     isNull(asset.deletedAt),
     eq(asset.lifecycle, 'REGISTERED'),
     input.departmentId ? eq(asset.departmentId, input.departmentId) : undefined,
+    input.companyCode ? eq(asset.companyCode, input.companyCode) : undefined,
+    input.locationId ? eq(asset.locationId, input.locationId) : undefined,
+    input.status ? eq(asset.status, input.status) : undefined,
+    input.fiscalYear ? eq(assetAccounting.fiscalYear, input.fiscalYear) : undefined,
+    input.minNetBookValue === undefined
+      ? undefined
+      : sql`${netBookValue} >= ${input.minNetBookValue}`,
+    input.maxNetBookValue === undefined
+      ? undefined
+      : sql`${netBookValue} <= ${input.maxNetBookValue}`,
     searchFilter,
   );
 
@@ -1058,6 +1097,7 @@ export async function findInventory(input: InventoryListInput): Promise<Paginate
     db
       .select({
         id: asset.id,
+        companyCode: asset.companyCode,
         assetNumber: asset.assetNumber,
         description: asset.description,
         serialNumber: asset.serialNumber,
@@ -1101,12 +1141,21 @@ export async function findInventory(input: InventoryListInput): Promise<Paginate
       .orderBy(asc(asset.assetNumber), asc(asset.id))
       .limit(limit)
       .offset((page - 1) * limit),
-    db.select({ value: count() }).from(asset).where(where),
+    // ★ ต้อง join assetAccounting ด้วย ไม่ใช่ .from(asset) เปล่า ๆ — where เดียวกันนี้
+    //   อ้างถึงคอลัมน์ของตารางบัญชี (fiscalYear / มูลค่าคงเหลือ) ถ้าไม่ join คิวรีนับจะพัง
+    //   ทันทีที่มีคนใช้ตัวกรองสองตัวนั้น ส่วนคิวรีดึงแถวยังทำงานปกติ = เพจไม่มา แต่ตารางมา
+    //   join นี้ไม่ทำให้แถวซ้ำ เพราะ asset_accounting มี assetId เป็น primary key (1:1)
+    db
+      .select({ value: count() })
+      .from(asset)
+      .leftJoin(assetAccounting, eq(assetAccounting.assetId, asset.id))
+      .where(where),
   ]);
 
   const data = rows.map(
     (r): InventoryItem => ({
       id: r.id,
+      companyCode: r.companyCode,
       // ck_asset_registered_needs_number บังคับไว้แล้วว่า REGISTERED ต้องมีเลข
       // — ที่นี่แค่ปลดชนิด null ให้ตรงกับความจริงที่ DB การันตี
       assetNumber: r.assetNumber ?? '',

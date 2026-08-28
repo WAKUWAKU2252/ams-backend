@@ -101,7 +101,9 @@ async function runInsert(input: CreateUserInput, passwordHash: string): Promise<
           // คนที่สองจะสร้างไม่ได้เลยเพราะ '' ชนกับ '' (ต่างจาก NULL ที่ซ้ำได้)
           empId: e.empId?.trim() || null,
           email: e.email?.trim() || null,
-          ownerCode: e.ownerCode ?? null,
+          // ช่องของ UBA — คนที่สร้างผ่านหน้าจอเป็นพนักงาน UBA เป็นค่าตั้งต้น (0021)
+          // คน UBP ต้องเติม ownerCodeUbp ทีหลัง ยังไม่มีหน้าจอให้กรอกสองช่อง
+          ownerCodeUba: e.ownerCode ?? null,
           departmentId: e.departmentId,
         })
         .returning();

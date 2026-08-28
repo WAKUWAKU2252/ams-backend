@@ -12,6 +12,7 @@
     "db:migrate": "drizzle-kit migrate",
     "db:import:department": "bun run src/intrastucture/db/import/department.ts",
     "db:import:employee": "bun run src/intrastucture/db/import/employee.ts",
+    "db:import:employee-ubp": "bun run src/intrastucture/db/import/employee-ubp.ts",
     "db:import:location": "bun run src/intrastucture/db/import/location.ts",
     "db:import:role": "bun run src/intrastucture/db/import/role.ts",
     "db:import:user": "bun run src/intrastucture/db/import/user.ts",

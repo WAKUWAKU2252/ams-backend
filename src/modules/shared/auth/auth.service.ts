@@ -20,7 +20,6 @@ export async function verifyCredentials(input: LoginInput) {
     with: { role: true },
   });
 
-  // ข้อความเดียวกันทุกกรณีที่ล้มเหลว — กันเดาว่า username ไหนมีอยู่จริง
   const invalid = new BadRequestError('ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
   if (!found || !found.isActive || !found.passwordHash) throw invalid;
 

@@ -13,7 +13,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '@intrastucture/db';
 import { asset, assetAccounting, assetLocation, category } from '@intrastucture/db/schema';
 import * as assetService from '@modules/business/asset/asset.service';
-import { makeEmployee, makeLocation, makeUser, resetDb } from './helpers/factory';
+import { makeEmployee, makeLocation, makeUser, resetDb, TEST_COMPANY } from './helpers/factory';
 
 /** สินทรัพย์เก่าจาก SAP — ใช้ในเทสต์นี้เพราะไม่ต้องมีโซ่ PO ครบชุดเหมือน PO_FLOW */
 async function makeLegacyAsset(opts: {
@@ -28,6 +28,7 @@ async function makeLegacyAsset(opts: {
     .insert(asset)
     .values({
       origin: 'SAP_LEGACY',
+      companyCode: TEST_COMPANY,
       assetNumber: opts.assetNumber,
       description: opts.description ?? 'ของทดสอบ',
       lifecycle: opts.lifecycle ?? 'REGISTERED',

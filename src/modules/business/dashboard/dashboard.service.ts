@@ -17,12 +17,14 @@
 // ═══════════════════════════════════════════════════════════════════════════
 import { and, asc, count, eq, isNotNull, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { db } from '@intrastucture/db';
-import { asset, assetAccounting, department, employee, user } from '@intrastucture/db/schema';
+import { asset, assetAccounting, company, department, employee, user } from '@intrastucture/db/schema';
 import { NotFoundError } from '@common/errors';
 import { requireRow } from '@common/db-result';
 import { DASHBOARD_ALL_DEPARTMENT_ROLE_LIST } from '@common/roles';
 import type {
   AssetStatus,
+  CompanySummary,
+  DashboardRemainingLife,
   DashboardOverview,
   DashboardOverviewInput,
   DashboardScope,
@@ -46,10 +48,17 @@ const STATUS_ORDER: AssetStatus[] = ['Active', 'Inactive', 'Under Maintenance', 
  */
 const REGISTERED_ASSET = and(isNull(asset.deletedAt), eq(asset.lifecycle, 'REGISTERED'));
 
-function scopeFilter(departmentId: number | null): SQL | undefined {
+/**
+ * เงื่อนไขของ asset ที่ทุกคิวรีในไฟล์นี้ต้องใช้ร่วมกัน
+ *
+ * ★ ทั้งสองแกนต้องถูกส่งต่อไปทุกที่ที่นับของ ไม่ใช่แค่คิวรี totals — ถ้าลืมที่ไหนที่หนึ่ง
+ *   ตัวเลขบนหน้าจะกระทบยอดกันไม่ได้ แล้วอ่านเป็นบั๊กทันที (และเถียงไม่ได้ด้วย)
+ */
+function assetFilter(departmentId: number | null, companyCode: string | null): SQL | undefined {
   return and(
     REGISTERED_ASSET,
     departmentId === null ? undefined : eq(asset.departmentId, departmentId),
+    companyCode === null ? undefined : eq(asset.companyCode, companyCode),
   );
 }
 
@@ -86,6 +95,26 @@ const COUNT_ASSETS = sql<number>`count(${asset.id})::int`;
 const COUNT_ACTIVE = sql<number>`count(${asset.id}) filter (where ${asset.status} = 'Active')::int`;
 
 /**
+ * แปลง companyCode ที่ส่งมาเป็นบริษัทจริง — แยกจาก resolveScope โดยตั้งใจ
+ *
+ * ★ บริษัทไม่ใช่แกนของสิทธิ์ ต่างจากแผนก จึงไม่ผ่าน role เลย ใครเลือกบริษัทไหนก็ได้
+ *   (ดูเหตุผลเต็มที่ DashboardScope.companyCode)
+ *
+ * รหัสที่ไม่มีในตารางต้องเป็น 404 ไม่ใช่เงียบ ๆ แล้วคืนศูนย์ — คืนศูนย์จะอ่านเหมือน
+ * "บริษัทนี้ไม่มีสินทรัพย์" ซึ่งคนละเรื่องกับ "พิมพ์รหัสผิด" คนละทางแก้
+ */
+async function resolveCompany(
+  requested: string | undefined,
+): Promise<{ code: string; name: string } | null> {
+  if (requested === undefined) return null;
+  // ไม่กรอง isActive — บริษัทที่เลิกใช้แล้วยังมีสินทรัพย์ค้างอยู่ได้ และบัญชียังต้องดูได้
+  // (กติกาเดียวกับแผนกที่ยุบไปแล้วใน resolveScope)
+  const row = await db.query.company.findFirst({ where: eq(company.code, requested) });
+  if (!row) throw new NotFoundError(`บริษัทรหัส ${requested}`);
+  return { code: row.code, name: row.name };
+}
+
+/**
  * ใครเห็นอะไรได้บ้าง — จุดเดียวที่ตัดสินเรื่องนี้ ห้ามให้ที่อื่นตีความซ้ำ
  *
  * ★ role ที่ไม่อยู่ใน DASHBOARD_ALL_DEPARTMENT_ROLES จะถูก **บังคับ** เป็นแผนกตัวเอง
@@ -93,10 +122,12 @@ const COUNT_ACTIVE = sql<number>`count(${asset.id}) filter (where ${asset.status
  *   ทั้งที่สิ่งที่ผู้ใช้ควรได้คือ "ข้อมูลของแผนกตัวเอง" ซึ่งเขามีสิทธิ์ดูอยู่แล้ว
  *   และผลลัพธ์บอกกลับไปเสมอว่าตัวเลขที่ได้เป็นของแผนกไหน (scope.departmentName)
  */
+type DepartmentScope = Omit<DashboardScope, 'companyCode' | 'companyName'>;
+
 async function resolveScope(
   currentUser: { id: number; role: string },
   requested: number | undefined,
-): Promise<DashboardScope> {
+): Promise<DepartmentScope> {
   if (DASHBOARD_ALL_DEPARTMENT_ROLE_LIST.includes(currentUser.role)) {
     if (requested === undefined) {
       return { kind: 'ALL', departmentId: null, departmentName: null, locked: false };
@@ -141,6 +172,10 @@ function emptyOverview(scope: DashboardScope, fiscalYear: number): DashboardOver
     freshness: { fiscalYear, currentYearCount: 0, staleCount: 0, noDataCount: 0 },
     status: { active: 0, inactive: 0, activePercent: null, inactivePercent: null, breakdown: [] },
     byDepartment: [],
+    remainingLife: null,
+    // ไม่มีแผนกให้นับก็ไม่มีอะไรให้แยกรายบริษัท — ช่องเลือกบริษัทบนจอจะเหลือแค่ "ทั้งหมด"
+    // ซึ่งถูกแล้ว เพราะคนกลุ่มนี้ต้องไปให้ผู้ดูแลผูกบัญชีกับพนักงานก่อน ไม่ใช่ไปกรองดูของ
+    byCompany: [],
   };
 }
 
@@ -152,10 +187,17 @@ export async function overview(
   // ไม่งั้นชิ้นเดียวกันจะขึ้นป้าย "ข้อมูลปีนี้" ที่หน้าหนึ่งและ "ปีเก่า" ที่อีกหน้า
   const fiscalYear = new Date().getFullYear();
 
-  const scope = await resolveScope(currentUser, input.departmentId);
+  // ตรวจรหัสบริษัทก่อนทุกอย่าง — รหัสผิดต้อง 404 ไม่ใช่ไปโผล่เป็นตัวเลขศูนย์ทั้งหน้า
+  const companyRow = await resolveCompany(input.companyCode);
+  const departmentScope = await resolveScope(currentUser, input.departmentId);
+  const scope: DashboardScope = {
+    ...departmentScope,
+    companyCode: companyRow?.code ?? null,
+    companyName: companyRow?.name ?? null,
+  };
   if (scope.kind === 'UNLINKED') return emptyOverview(scope, fiscalYear);
 
-  const where = scopeFilter(scope.departmentId);
+  const where = assetFilter(scope.departmentId, scope.companyCode);
 
   const totalsRows = await db
     .select({
@@ -188,7 +230,14 @@ export async function overview(
   const active = byStatus.get('Active') ?? 0;
   const inactive = totals.assets - active;
 
-  const byDepartment = await summarizeByDepartment(scope.departmentId);
+  // ยิงคู่กันไปเลย ไม่ได้ใช้ผลของกันและกัน
+  const [byDepartment, byCompany, remainingLife] = await Promise.all([
+    summarizeByDepartment(scope.departmentId, scope.companyCode),
+    // ★ ไม่ส่ง scope.companyCode เข้าไปโดยตั้งใจ — ลิสต์นี้เป็นตัวเลือกใน dropdown ด้วย
+    //   กรองตามที่เลือกเมื่อไหร่ ผู้ใช้จะกดกลับไปบริษัทอื่นไม่ได้อีก (ดู CompanySummary)
+    summarizeByCompany(scope.departmentId),
+    summarizeRemainingLife(scope.departmentId, scope.companyCode),
+  ]);
 
   return {
     scope,
@@ -215,6 +264,8 @@ export async function overview(
       breakdown,
     },
     byDepartment,
+    byCompany,
+    remainingLife,
   };
 }
 
@@ -231,7 +282,10 @@ export async function overview(
  *   ย้ายเมื่อไหร่ LEFT JOIN จะกลายเป็น INNER JOIN โดยปริยาย (แถวที่ asset เป็น NULL
  *   ตกเงื่อนไขทุกข้อ) แล้วแผนก 0 ชิ้นจะหายไปอีกครั้งแบบเงียบ ๆ
  */
-async function summarizeByDepartment(departmentId: number | null): Promise<DepartmentSummary[]> {
+async function summarizeByDepartment(
+  departmentId: number | null,
+  companyCode: string | null,
+): Promise<DepartmentSummary[]> {
   const rows = await db
     .select({
       departmentId: department.id,
@@ -243,7 +297,15 @@ async function summarizeByDepartment(departmentId: number | null): Promise<Depar
       netBookValue: SUM_NBV,
     })
     .from(department)
-    .leftJoin(asset, and(eq(asset.departmentId, department.id), REGISTERED_ASSET))
+    // เงื่อนไขบริษัทอยู่ใน ON ไม่ใช่ WHERE ด้วยเหตุผลเดียวกับ REGISTERED_ASSET ข้างบน
+    .leftJoin(
+      asset,
+      and(
+        eq(asset.departmentId, department.id),
+        REGISTERED_ASSET,
+        companyCode === null ? undefined : eq(asset.companyCode, companyCode),
+      ),
+    )
     .leftJoin(assetAccounting, eq(assetAccounting.assetId, asset.id))
     .where(
       departmentId === null
@@ -280,7 +342,7 @@ async function summarizeByDepartment(departmentId: number | null): Promise<Depar
       })
       .from(asset)
       .leftJoin(assetAccounting, eq(assetAccounting.assetId, asset.id))
-      .where(and(REGISTERED_ASSET, isNull(asset.departmentId)));
+      .where(and(assetFilter(null, companyCode), isNull(asset.departmentId)));
 
     const orphan = requireRow(orphanRows, 'dashboard orphan department');
     // ไม่มีของกลุ่มนี้ = ไม่ต้องมีแถว (แถว 0 ที่ไม่ใช่แผนกจริงมีแต่ทำให้สับสน)
@@ -290,4 +352,114 @@ async function summarizeByDepartment(departmentId: number | null): Promise<Depar
   }
 
   return summaries;
+}
+
+/**
+ * สรุปรายบริษัท — **ตั้งต้นจากตาราง company ไม่ใช่ asset** ด้วยเหตุผลเดียวกับรายแผนก
+ * บริษัทที่ยังไม่มีของสักชิ้นต้องมีแถวออกมาเป็น 0 ไม่ใช่หายไปเฉย ๆ
+ * ไม่งั้นมันจะไม่โผล่ใน dropdown แล้วผู้ใช้จะเลือกดูไม่ได้เลยว่ามีอะไรอยู่บ้าง
+ *
+ * ★ ไม่รับ companyCode — ก้อนนี้เป็นตัวเลือกใน dropdown ด้วย (ดู CompanySummary)
+ *
+ * ★ เงื่อนไขแผนกต้องอยู่ใน ON ของ LEFT JOIN เท่านั้น ห้ามย้ายไป WHERE
+ *   ย้ายเมื่อไหร่ LEFT JOIN กลายเป็น INNER JOIN โดยปริยาย แล้วบริษัท 0 ชิ้นหายเงียบ ๆ
+ *
+ * ไม่มีแถว "ยังไม่ระบุบริษัท" คู่กับของแผนก — asset.companyCode เป็น NOT NULL
+ * และมี FK ไป company.code จึงไม่มีทางมีชิ้นที่ไม่มีบริษัท (ต่างจาก departmentId ที่ nullable)
+ */
+async function summarizeByCompany(departmentId: number | null): Promise<CompanySummary[]> {
+  const rows = await db
+    .select({
+      companyCode: company.code,
+      companyName: company.name,
+      assets: COUNT_ASSETS,
+      active: COUNT_ACTIVE,
+      bookedCost: SUM_COST,
+      accumulatedDepreciation: SUM_DEP,
+      netBookValue: SUM_NBV,
+    })
+    .from(company)
+    .leftJoin(
+      asset,
+      and(
+        eq(asset.companyCode, company.code),
+        REGISTERED_ASSET,
+        departmentId === null ? undefined : eq(asset.departmentId, departmentId),
+      ),
+    )
+    .leftJoin(assetAccounting, eq(assetAccounting.assetId, asset.id))
+    .where(
+      // ในเครือมี 7 บริษัท แต่ 5 บริษัทไม่มี SAP ให้ sync จึงไม่มีทางมีสินทรัพย์เข้ามา
+      // ถ้าโชว์หมดจะได้ dropdown ที่มีตัวเลือกตายอยู่ 5 อัน — เอาเฉพาะที่ "มีทางจะมีของ"
+      // (เปิดใช้งาน + ต่อ SAP) หรือ "มีของค้างอยู่จริง" แม้จะปิดใช้งานไปแล้ว
+      or(and(eq(company.isActive, true), isNotNull(company.sapDbName)), isNotNull(asset.id)),
+    )
+    .groupBy(company.code, company.name)
+    // มากไปน้อยตามจำนวนชิ้น แล้วค่อยเรียงรหัส — บริษัท 0 ชิ้นไปกองท้ายเอง
+    .orderBy(sql`count(${asset.id}) desc`, asc(company.code));
+
+  return rows.map((r) => ({ ...r }));
+}
+
+/**
+ * การกระจายของอายุคงเหลือในแผนกเดียว
+ *
+ * ★ คืน null เมื่อยังไม่ได้เลือกแผนก — ไม่ใช่แค่ซ่อนบนจอ แต่ไม่คิดให้เลย
+ *   รวมทั้งบริษัทแล้วกราฟจะกลายเป็นรูปเดียวกันทุกครั้งจนไม่มีใครอ่าน (ดู DashboardRemainingLife)
+ *
+ * ★ นับด้วย filter ในคิวรีเดียว ไม่ใช่ GROUP BY ช่วง — ได้ครบทุกช่องเสมอแม้ช่องนั้นเป็น 0
+ *   ถ้า GROUP BY ช่วงที่ไม่มีของจะหายไปจากผล แล้วกราฟจะขาดแท่งเป็นช่วง ๆ โดยไม่มีอะไรฟ้อง
+ *
+ * ★ เงื่อนไขของช่วงเวลาต้องตัด usefulLifeMonths = 0 ออกทุกช่อง — ของที่ไม่คิดค่าเสื่อม
+ *   (ที่ดิน) มี remainingLifeMonths = 0 เหมือนของที่ตัดครบแล้วเป๊ะ ถ้าไม่แยกจะถูกนับ
+ *   เป็น "ตัดครบแล้ว" ทั้งที่ไม่เคยเริ่มตัดเลย
+ */
+async function summarizeRemainingLife(
+  departmentId: number | null,
+  companyCode: string | null,
+): Promise<DashboardRemainingLife | null> {
+  if (departmentId === null) return null;
+
+  const where = assetFilter(departmentId, companyCode);
+  const life = assetAccounting.remainingLifeMonths;
+  const useful = assetAccounting.usefulLifeMonths;
+
+  // ช่วงเวลาทั้งหมดต้อง "คิดค่าเสื่อมอยู่จริง" (useful <> 0) และมีตัวเลขอายุคงเหลือ
+  const inRange = (lo: number, hi: number | null) =>
+    hi === null
+      ? sql<number>`count(*) filter (where ${useful} <> 0 and ${life} > ${lo})::int`
+      : sql<number>`count(*) filter (where ${useful} <> 0 and ${life} >= ${lo} and ${life} <= ${hi})::int`;
+
+  const rows = await db
+    .select({
+      expired: sql<number>`count(*) filter (where ${useful} <> 0 and ${life} = 0)::int`,
+      m1: inRange(1, 12),
+      m2: inRange(13, 24),
+      m3: inRange(25, 36),
+      m4: inRange(37, 48),
+      m5: inRange(49, 60),
+      over: inRange(60, null),
+      noDepreciation: sql<number>`count(*) filter (where ${useful} = 0)::int`,
+      // ไม่มีแถวบัญชีเลย หรือมีแถวแต่ SAP ไม่ได้ให้อายุมา — ตอบไม่ได้ทั้งคู่
+      noData: sql<number>`count(*) filter (where ${assetAccounting.assetId} is null or ${life} is null or ${useful} is null)::int`,
+    })
+    .from(asset)
+    .leftJoin(assetAccounting, eq(assetAccounting.assetId, asset.id))
+    .where(where);
+
+  const r = requireRow(rows, 'dashboard remaining life');
+
+  return {
+    buckets: [
+      { label: 'ตัดครบแล้ว', count: r.expired },
+      { label: '1–12 เดือน', count: r.m1 },
+      { label: '13–24 เดือน', count: r.m2 },
+      { label: '25–36 เดือน', count: r.m3 },
+      { label: '37–48 เดือน', count: r.m4 },
+      { label: '49–60 เดือน', count: r.m5 },
+      { label: 'เกิน 60 เดือน', count: r.over },
+    ],
+    noDepreciation: r.noDepreciation,
+    noData: r.noData,
+  };
 }

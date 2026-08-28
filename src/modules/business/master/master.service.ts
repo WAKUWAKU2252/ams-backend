@@ -1,7 +1,8 @@
-import { and, asc, count, eq, ilike, or, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, ilike, or, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { db } from '@intrastucture/db';
 import {
+  assetAccounting,
   assetLocation,
   assetSubLocation,
   category,
@@ -259,4 +260,26 @@ export async function findEmployees(input: EmployeeListInput): Promise<Paginated
   );
 
   return paginate(data, requireScalar(totalResult, 'count employee'), page, limit);
+}
+
+// ── ปีบัญชี ────────────────────────────────────────────────────────────────
+
+/**
+ * ปีที่มีตัวเลขบัญชีอยู่จริงในทะเบียน — ใช้เป็นตัวเลือกใน dropdown ของหน้าทะเบียน
+ *
+ * ไม่ใช่ master table แต่เป็น "ตัวเลือกของ dropdown" เหมือนตัวอื่นในโมดูลนี้ จึงอยู่ที่นี่
+ *
+ * ★ อ่านจากข้อมูลจริง ไม่ใช่ไล่ช่วงปีจากปีปัจจุบันย้อนหลัง — ตัวเลขที่ sync มาค้างที่ปีเก่า
+ *   ได้จริง (วัด 2026-08-20: 25% ของทะเบียน) และค้างไม่เท่ากันด้วย ถ้าไล่ช่วงเอาเองจะได้
+ *   ตัวเลือกที่กดแล้วว่างปนอยู่ แล้วผู้ใช้แยกไม่ออกว่าปีนั้นไม่มีของ หรือระบบมีบั๊ก
+ *
+ * เรียงมากไปน้อย — ปีล่าสุดคือปีที่คนถามถึงบ่อยสุด ควรอยู่บนสุดของลิสต์
+ */
+export async function findFiscalYears(): Promise<number[]> {
+  const rows = await db
+    .selectDistinct({ fiscalYear: assetAccounting.fiscalYear })
+    .from(assetAccounting)
+    .orderBy(desc(assetAccounting.fiscalYear));
+
+  return rows.map((r) => r.fiscalYear);
 }

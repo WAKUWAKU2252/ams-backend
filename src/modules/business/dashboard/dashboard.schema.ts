@@ -10,4 +10,9 @@ import { t } from 'elysia';
  */
 export const dashboardOverviewQuery = t.Object({
   departmentId: t.Optional(t.Numeric({ minimum: 1 })),
+  /**
+   * รหัสบริษัท — ตรวจว่ามีอยู่จริงที่ service (ต้อง query ตาราง company) ที่นี่ตรวจได้แค่ฟอร์ม
+   * ความยาวตรงกับ company.code varchar(20)
+   */
+  companyCode: t.Optional(t.String({ minLength: 1, maxLength: 20 })),
 });

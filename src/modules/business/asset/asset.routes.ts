@@ -58,6 +58,6 @@ export const assetRoutes = new Elysia({ prefix: '/assets' })
  * เจอ router/proxy ที่ decode ก่อน match แล้วแตกเป็นสอง segment → 404 โดยไม่มีอะไรบอก
  */
 export const assetPublicRoutes = new Elysia({ prefix: '/assets' })
-  .get('/by-number', ({ query }) => assetService.findByAssetNumber(query.number), {
+  .get('/by-number', ({ query }) => assetService.findByAssetNumber(query.number, query.company), {
     query: assetByNumberQuery,
   });

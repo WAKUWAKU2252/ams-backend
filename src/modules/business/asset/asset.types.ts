@@ -257,6 +257,13 @@ export interface MyAssetAccounting {
 /** หนึ่งชิ้นในหน้า My asset */
 export interface MyAssetItem {
   id: number;
+  /**
+   * บริษัทเจ้าของชิ้น — จำเป็นสำหรับเปิดรายละเอียดผ่าน GET /assets/by-number
+   *
+   * ★ เลขสินทรัพย์ซ้ำกันข้ามบริษัทจริง 24 ตัว (วัดจาก OITM) เลขเปล่าจึงชี้ได้สองชิ้น
+   *   ต้องส่งคู่กันเสมอ ห้ามให้หน้าจอเดาว่าเป็นบริษัทไหน
+   */
+  companyCode: string;
   assetNumber: string | null;
   description: string | null;
   imageId: string | null;
@@ -315,6 +322,17 @@ export interface AssetByNumberDetail {
   holderName: string | null;
   acquisitionDate: string | null;
   acquisitionCost: number | null;
+  /**
+   * ระยะประกัน — ส่งดิบทั้งคู่ ให้ฝั่งแสดงผลประกอบข้อความเอง (รูปแบบวันที่เป็นเรื่องของ locale)
+   *
+   * ★ สอง nullable อิสระจากกัน มีครบ 4 กรณีจริง (ไม่มีเลย / มีแต่เริ่ม / มีแต่จบ / มีทั้งคู่)
+   *   ฝั่งแสดงผลต้องเขียนครบทุกกรณี ไม่ใช่สมมติว่ามาคู่กันเสมอ
+   *
+   * ★ เส้นนี้เปิดสาธารณะ (ปลายทาง QR) — วันหมดประกันไม่ใช่ข้อมูลลับ และเป็นสิ่งที่ช่างที่
+   *   ยืนอยู่หน้าเครื่องต้องรู้ก่อนตัดสินใจว่าจะซ่อมเองหรือส่งเคลม จึงปล่อยได้
+   */
+  warrantyStartDate: string | null;
+  warrantyEndDate: string | null;
   accounting: MyAssetAccounting | null;
 }
 
@@ -337,6 +355,11 @@ export interface InventoryAccounting {
 /** หนึ่งแถวในตาราง Asset Inventory */
 export interface InventoryItem {
   id: number;
+  /**
+   * ใช้ประกอบลิงก์ไปหน้ารายละเอียด /assets/:company/:assetNumber
+   * จำเป็นเพราะเลขสินทรัพย์ซ้ำกันข้ามบริษัทจริง 24 ตัว — เลขเปล่าชี้ได้สองชิ้น
+   */
+  companyCode: string;
   /** ไม่เป็น null — หน้านี้แสดงเฉพาะชิ้นที่ลงทะเบียนแล้ว ซึ่ง DB บังคับว่าต้องมีเลข */
   assetNumber: string;
   description: string | null;
@@ -358,4 +381,13 @@ export interface InventoryListInput {
   limit: number;
   search?: string;
   departmentId?: number;
+  /** รหัสบริษัท — ตารางบน Dashboard ส่งมาให้ตรงกับการ์ดสรุปข้างบน */
+  companyCode?: string;
+  locationId?: number;
+  status?: AssetRow['status'];
+  /** ปีบัญชีของตัวเลขที่ sync มา ไม่ใช่ปีที่ซื้อ — ชิ้นที่ไม่มีแถวบัญชีจะไม่อยู่ในผล */
+  fiscalYear?: number;
+  /** ช่วงมูลค่าคงเหลือ — ชิ้นที่คำนวณ NBV ไม่ได้จะไม่อยู่ในผล (เทียบค่าไม่ได้) */
+  minNetBookValue?: number;
+  maxNetBookValue?: number;
 }

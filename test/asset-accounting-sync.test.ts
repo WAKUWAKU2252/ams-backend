@@ -17,7 +17,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '@intrastucture/db';
 import { asset, assetAccounting, assetLocation, category } from '@intrastucture/db/schema';
 import type { Tx } from '@modules/integrate/SAP/sync.types';
-import { resetDb } from './helpers/factory';
+import { resetDb, TEST_COMPANY } from './helpers/factory';
 
 // ปิดประตู SAP ก่อน import connector — เหตุผลเต็มอยู่ที่ asset-sync-po-flow.test.ts
 const realSapClient = await import('@intrastucture/sap/client');
@@ -28,7 +28,9 @@ mock.module('@intrastucture/sap/client', () => ({
   },
 }));
 
-const { assetConnector } = await import('@modules/integrate/SAP/connectors/asset.connector');
+// connector เป็น factory ตั้งแต่ 0021 — ผูกกับบริษัทก่อนใช้
+const { makeAssetConnector } = await import('@modules/integrate/SAP/connectors/asset.connector');
+const assetConnector = makeAssetConnector(TEST_COMPANY, '117');
 type LegacyAssetPull = Parameters<typeof assetConnector.apply>[1];
 type LegacyAssetRow = LegacyAssetPull['assets'][number];
 
@@ -75,6 +77,9 @@ const sapAsset = (over: Partial<LegacyAssetRow> = {}): LegacyAssetRow => ({
   vendor: null,
   invoiceNo: null,
   acqCost: null,
+  // มาคนละ join กับชุด ITM8 ข้างล่าง (ACQ1) จึงไม่ได้อยู่ใน NO_ACCOUNTING — ค่าเริ่มต้น
+  // คือ "ไม่มีรายการซื้อใน ACQ1" เทสต์ที่ต้องการทดสอบทางถอยกลับต้องส่งค่ามาเอง
+  acquisitionPostedTotal: null,
   ...NO_ACCOUNTING,
   ...over,
 });
@@ -212,6 +217,62 @@ describe('เขียนมูลค่าทางบัญชี', () => {
     // "ไม่มีแถว = ยังไม่เคย sync ข้อมูลบัญชี" คือกติกาที่ทำให้ไม่ต้องมีคอลัมน์ธงบน asset
     const errors = spyOn(console, 'error').mockImplementation(() => {});
     await assetConnector.apply(tx, pull([sapAsset()]));
+    errors.mockRestore();
+
+    expect(await db.$count(asset)).toBe(1);
+    expect(await db.$count(assetAccounting)).toBe(0);
+  });
+});
+
+describe('APC เป็น 0 ในปีที่ซื้อ → ถอยไปใช้ยอดรวมรายการซื้อจาก ACQ1', () => {
+  // ITM8.APC คือ "ยอดยกมาต้นปีบัญชี" ไม่ใช่ยอดปลายปี ปีที่ซื้อจึงเป็น 0 เสมอเพราะตอนต้นปี
+  // ของยังไม่เข้ามา — ของที่เพิ่งซื้อในปีบัญชีปัจจุบันมีแถว ITM8 อยู่แถวเดียวคือแถวนั้นพอดี
+  // (วัด 2026-08-24: 101 จาก 2,726 ชิ้น ทั้งหมดมีแถวเดียวจริง ไม่มีเคสตัดจำหน่ายปนมา
+  //  และ 100 ชิ้นในนั้นมียอดจริงใน ACQ1) ถ้าไม่ถอยไปเอา ของใหม่ทุกชิ้นจะเข้าระบบด้วย
+  // มูลค่า 0 โดยรอบ sync ยังขึ้น SUCCESS ตามปกติ ไม่มีอะไรฟ้อง
+
+  test('APC = 0 แต่ ACQ1 มียอด → ใช้ยอดจาก ACQ1', async () => {
+    await assetConnector.apply(
+      tx,
+      pull([sapAsset({ ...acct({ bookedCost: 0 }), acquisitionPostedTotal: 12871.03 })]),
+    );
+
+    expect((await readAcct())!.bookedCost).toBe(12871.03);
+  });
+
+  test('APC เป็น NULL แต่ ACQ1 มียอด → ใช้ยอดจาก ACQ1', async () => {
+    await assetConnector.apply(
+      tx,
+      pull([sapAsset({ ...acct({ bookedCost: null }), acquisitionPostedTotal: 12871.03 })]),
+    );
+
+    expect((await readAcct())!.bookedCost).toBe(12871.03);
+  });
+
+  test('APC มีค่าอยู่แล้ว → ACQ1 ห้ามทับ', async () => {
+    // ★ กติกาที่สำคัญที่สุดของทั้งบล็อกนี้: ACQ1 = ยอดรวม "รายการซื้อทั้งหมดที่เคยเกิด"
+    // ส่วน APC = ยอดคงเหลือที่ผ่านการตัดจำหน่าย/ปรับปรุงมาแล้ว ปล่อยให้ทับเมื่อไหร่
+    // = ฟื้นมูลค่าของที่ตัดจำหน่ายไปแล้วกลับมาเต็มจำนวน โดยไม่มีอะไรฟ้อง
+    await assetConnector.apply(
+      tx,
+      pull([sapAsset({ ...acct({ bookedCost: 500 }), acquisitionPostedTotal: 12871.03 })]),
+    );
+
+    expect((await readAcct())!.bookedCost).toBe(500);
+  });
+
+  test('ไม่มียอดทั้งสองฝั่ง → คงค่าเดิมของ ITM8 ไม่แต่งให้ดูดีกว่าความจริง', async () => {
+    // มีอยู่ 1 ชิ้นที่เป็นแบบนี้จริง = ไม่เคยมีรายการซื้อ ต้องเห็นเป็น 0 ตามตรง
+    await assetConnector.apply(tx, pull([sapAsset(acct({ bookedCost: 0 }))]));
+
+    expect((await readAcct())!.bookedCost).toBe(0);
+  });
+
+  test('ไม่มีแถว ITM8 เลย → ยังไม่เขียนแถวบัญชี แม้ ACQ1 จะมียอด', async () => {
+    // ACQ1 เป็นทางถอยของ "ยอดในแถวที่มีอยู่" ไม่ใช่ตัวสร้างแถวบัญชีขึ้นมาเอง —
+    // fiscalYear เป็น NOT NULL และ ACQ1 ไม่ได้บอกปีบัญชี จึงไม่มีอะไรให้เขียนลงไป
+    const errors = spyOn(console, 'error').mockImplementation(() => {});
+    await assetConnector.apply(tx, pull([sapAsset({ acquisitionPostedTotal: 12871.03 })]));
     errors.mockRestore();
 
     expect(await db.$count(asset)).toBe(1);

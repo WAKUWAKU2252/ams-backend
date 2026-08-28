@@ -10,7 +10,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '@intrastucture/db';
 import { asset, assetAccounting, assetSubLocation, category } from '@intrastucture/db/schema';
 import * as assetService from '@modules/business/asset/asset.service';
-import { makeDepartment, makeEmployee, makeLocation, resetDb } from './helpers/factory';
+import { makeDepartment, makeEmployee, makeLocation, resetDb, TEST_COMPANY } from './helpers/factory';
 
 let locationId = 0;
 
@@ -26,6 +26,7 @@ async function makeLegacyAsset(opts: {
     .insert(asset)
     .values({
       origin: 'SAP_LEGACY',
+      companyCode: TEST_COMPANY,
       assetNumber: opts.assetNumber,
       description: opts.description ?? 'ของทดสอบ',
       lifecycle: 'REGISTERED',
@@ -59,7 +60,7 @@ describe('ค้นด้วยเลขสินทรัพย์', () => {
       usefulLifeMonths: 36,
     });
 
-    const res = await assetService.findByAssetNumber('COM-100-05-002');
+    const res = await assetService.findByAssetNumber('COM-100-05-002', TEST_COMPANY);
 
     expect(res.id).toBe(id);
     expect(res.description).toBe('DELL 780');
@@ -76,7 +77,7 @@ describe('ค้นด้วยเลขสินทรัพย์', () => {
     // จะแตกเป็นสอง segment แล้ว 404 ทั้งที่ของมีอยู่
     const id = await makeLegacyAsset({ assetNumber, description });
 
-    const res = await assetService.findByAssetNumber(assetNumber);
+    const res = await assetService.findByAssetNumber(assetNumber, TEST_COMPANY);
 
     expect(res.id).toBe(id);
     expect(res.assetNumber).toBe(assetNumber);
@@ -86,7 +87,7 @@ describe('ค้นด้วยเลขสินทรัพย์', () => {
     // เลขที่ถูก copy มาจาก Excel/อีเมลติดช่องว่างมาด้วยเป็นเรื่องปกติ
     await makeLegacyAsset({ assetNumber: 'COM-100-05-002' });
 
-    const res = await assetService.findByAssetNumber('  COM-100-05-002  ');
+    const res = await assetService.findByAssetNumber('  COM-100-05-002  ', TEST_COMPANY);
 
     expect(res.assetNumber).toBe('COM-100-05-002');
   });
@@ -113,7 +114,7 @@ describe('ข้อมูลประกอบที่คนหน้างา�
       categoryId: cat!.id,
     });
 
-    const res = await assetService.findByAssetNumber('COM-100-05-002');
+    const res = await assetService.findByAssetNumber('COM-100-05-002', TEST_COMPANY);
 
     expect(res.subLocationName).toBe('ชั้น 2 / ห้อง 201');
     expect(res.departmentName).toBe('แผนกบัญชี');
@@ -124,7 +125,7 @@ describe('ข้อมูลประกอบที่คนหน้างา�
   test('ไม่มีผู้ดูแล → null ไม่ใช่ error (ของเก่าส่วนใหญ่เป็นแบบนี้)', async () => {
     await makeLegacyAsset({ assetNumber: 'COM-100-05-002' });
 
-    const res = await assetService.findByAssetNumber('COM-100-05-002');
+    const res = await assetService.findByAssetNumber('COM-100-05-002', TEST_COMPANY);
 
     expect(res.holderName).toBeNull();
     expect(res.departmentName).toBeNull();
@@ -135,7 +136,7 @@ describe('ข้อมูลประกอบที่คนหน้างา�
 describe('เคสที่ต้องปฏิเสธ', () => {
   test('เลขที่ไม่มีในระบบ → 404 พร้อมเลขที่สแกนมา', async () => {
     // ข้อความต้องมีเลขอยู่ด้วย คนหน้างานจะได้รายงานต่อได้ว่าสติกเกอร์ใบไหนมีปัญหา
-    await expect(assetService.findByAssetNumber('COM-999-99-999')).rejects.toThrow(
+    await expect(assetService.findByAssetNumber('COM-999-99-999', TEST_COMPANY)).rejects.toThrow(
       /COM-999-99-999/,
     );
   });
@@ -147,10 +148,10 @@ describe('เคสที่ต้องปฏิเสธ', () => {
       .set({ deletedAt: '2026-08-20T00:00:00.000Z' })
       .where(eq(asset.id, id));
 
-    await expect(assetService.findByAssetNumber('COM-100-05-002')).rejects.toThrow();
+    await expect(assetService.findByAssetNumber('COM-100-05-002', TEST_COMPANY)).rejects.toThrow();
   });
 
   test('ส่งช่องว่างล้วนมา → บอกว่าต้องระบุเลข', async () => {
-    await expect(assetService.findByAssetNumber('   ')).rejects.toThrow(/ระบุเลขสินทรัพย์/);
+    await expect(assetService.findByAssetNumber('   ', TEST_COMPANY)).rejects.toThrow(/ระบุเลขสินทรัพย์/);
   });
 });

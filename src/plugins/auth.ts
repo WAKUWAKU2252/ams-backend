@@ -46,3 +46,4 @@ export const requireRole = (...roles: string[]) =>
       if (!currentUser) throw new UnauthorizedError();
       if (!roles.includes(currentUser.role)) throw new ForbiddenError();
     });
+

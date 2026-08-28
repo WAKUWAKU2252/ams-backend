@@ -5,6 +5,7 @@ import {
   asset,
   assetRequest,
   assetRequestOpener,
+  department,
   employee,
   purchaseOrder,
   purchaseOrderItem,
@@ -112,8 +113,31 @@ export async function getDraft(id: number, userId: number) {
       set: { lastOpenedAt: sql`now()` },
     });
 
+  // ── เติมแผนก/หัวหน้าของผู้ขอซื้อลงใน purchaseOrder ให้เลย
+  //
+  // สามอย่างนี้ (departmentId/departmentName/manager*) ไม่ได้อยู่บนแถว purchase_order —
+  // ต้องไต่ ownerPrId → employee.departmentId → department → managerId เอา
+  //
+  // เดิมเส้นนี้คืนแถวดิบ แล้วหน้าจอต้องยิง GET /purchase-orders/:poNumber ซ้ำอีกรอบ
+  // แล้วคัดลอกทีละช่องมายัดใส่เอง — ซึ่งพลาดมาแล้วจริง (ลืม departmentName ทั้งสองจุด
+  // ค่าเลยเป็น undefined เงียบ ๆ ไม่มี error อะไรฟ้อง) คืนมาจากที่เดียวจึงไม่มีอะไรให้ลืม
+  //
+  // ชื่อ field ตรงกับที่ GET /purchase-orders/:poNumber คืน เพื่อให้ทั้งสองเส้นใช้ type เดียวกันได้
+  const target = await poService.findApprovalTarget(request.purchaseOrder.ownerPrId);
+
   // lock ไม่อยู่ที่ DB แล้ว — สถานะ lock จริงมาจากสาย presence (registry in-memory) ที่ frontend เปิดเอง
-  return request;
+  return {
+    ...request,
+    purchaseOrder: {
+      ...request.purchaseOrder,
+      departmentId: target.departmentId,
+      departmentName: target.departmentName,
+      managerId: target.managerEmployeeId,
+      managerFirstName: target.managerFirstName,
+      managerLastName: target.managerLastName,
+      manageremail: target.managerEmail,
+    },
+  };
 }
 
 export async function listMyDrafts(userId: number, { page, limit, status }: ListQuery) {
@@ -621,6 +645,9 @@ function pendingRegistrationQuery() {
   // จึงต้อง leftJoin employee ต่อจาก user อีกชั้น — leftJoin ทั้งคู่เพราะ user อาจยังไม่ผูกพนักงาน
   const submitterEmp = alias(employee, 'submitter_emp');
   const approverEmp = alias(employee, 'approver_emp');
+  // ผู้ขอซื้อ (OwnerPR) — คนละคนกับผู้ส่งคำขอ จึงต้องเป็น alias ตัวที่สาม
+  // ใช้ไต่ไปหาแผนก: purchase_order.ownerPrId → employee.departmentId → department.name
+  const ownerEmp = alias(employee, 'owner_emp');
 
   return db
     .select({
@@ -647,6 +674,9 @@ function pendingRegistrationQuery() {
       },
       vendorName: purchaseOrder.vendorName,
       ownerPrName: purchaseOrder.ownerPrName,
+      // แผนกของผู้ขอซื้อ — ไม่ได้อยู่บนแถว purchase_order ต้องไต่ผ่าน employee
+      // leftJoin ทั้งสองชั้น: PO เก่าไม่มี ownerPrId / พนักงานบางคนยังไม่ผูกแผนก
+      departmentName: department.name,
       // วันที่บน PO (จาก SAP) — nullable เพราะ PO เก่าบางใบไม่มีวันที่ในต้นทาง
       poDate: purchaseOrder.poDate,
       totalAssets,
@@ -662,7 +692,9 @@ function pendingRegistrationQuery() {
     .leftJoin(submitter, eq(submitter.id, assetRequest.submittedBy))
     .leftJoin(submitterEmp, eq(submitterEmp.id, submitter.employeeId))
     .leftJoin(approver, eq(approver.id, assetRequest.approvedBy))
-    .leftJoin(approverEmp, eq(approverEmp.id, approver.employeeId));
+    .leftJoin(approverEmp, eq(approverEmp.id, approver.employeeId))
+    .leftJoin(ownerEmp, eq(ownerEmp.id, purchaseOrder.ownerPrId))
+    .leftJoin(department, eq(department.id, ownerEmp.departmentId));
 }
 
 type PendingRegistrationRaw = Awaited<ReturnType<typeof pendingRegistrationQuery>>[number];
@@ -766,7 +798,15 @@ export async function assignAssetNumber(
     }
 
     const [target] = await tx
-      .select({ id: asset.id, lifecycle: asset.lifecycle, assetNumber: asset.assetNumber, rejectedAt: asset.rejectedAt })
+      .select({
+        id: asset.id,
+        lifecycle: asset.lifecycle,
+        assetNumber: asset.assetNumber,
+        rejectedAt: asset.rejectedAt,
+        // ใช้ประกอบ QR — บริษัทต้องมาจากตัวชิ้นเอง ไม่ใช่จาก scope ของคนที่กดออกเลข
+        // (บัญชีกลางเห็นหลายบริษัท ถ้าเอาจาก scope จะได้ตัวแรกในลิสต์ซึ่งผิดได้)
+        companyCode: asset.companyCode,
+      })
       .from(asset)
       .where(and(eq(asset.id, assetId), eq(asset.requestId, requestId), isNull(asset.deletedAt)));
     // เช็ค requestId ใน where ด้วย — กันคนยิง assetId ของใบอื่นเข้ามาผ่าน URL ของใบนี้
@@ -806,7 +846,16 @@ export async function assignAssetNumber(
       })
       .from(asset)
       // ไม่นับตัวเอง — แก้เลขชิ้นเดิมโดยส่งเลขเดิมกลับมา (หรือกดซ้ำ) ต้องไม่ฟ้องว่าชนกับตัวเอง
-      .where(and(eq(asset.assetNumber, assetNumber), ne(asset.id, assetId), isNull(asset.deletedAt)));
+      .where(
+        and(
+          eq(asset.assetNumber, assetNumber),
+          // ★ ต้องจำกัดที่บริษัทเดียวกัน — uq_asset_number เป็น (companyCode, assetNumber)
+          //   แล้วตั้งแต่ 0021 เลขเดียวกันคนละบริษัทไม่ถือว่าชน (มีจริง 24 คู่)
+          eq(asset.companyCode, target.companyCode),
+          ne(asset.id, assetId),
+          isNull(asset.deletedAt),
+        ),
+      );
     if (clash) {
       const from = clash.origin === 'SAP_LEGACY' ? 'ดึงมาจาก SAP' : 'ลงทะเบียนผ่าน AMS';
       throw new ConflictError(
@@ -824,7 +873,7 @@ export async function assignAssetNumber(
         lifecycle: 'REGISTERED',
         // QR เกิดพร้อมเลข ไม่ใช่ตอนสร้างชิ้น — ก่อนมีเลขยังไม่มีอะไรให้สติกเกอร์ชี้ถึง
         // แก้เลขทับของเดิม = QR ต้องตามไปด้วย ไม่งั้นสติกเกอร์ที่พิมพ์รอบใหม่จะชี้เลขเก่า
-        qrCode: assetQrUrl(assetNumber),
+        qrCode: assetQrUrl(target.companyCode, assetNumber),
         registeredAt: sql`now()`,
         registeredBy: userId,
         // ป้าย "แก้ไขแล้ว" หมดหน้าที่ตรงนี้ — งานรอบนั้นจบแล้ว ปล่อยค้างไว้ป้ายจะติดข้ามรอบ

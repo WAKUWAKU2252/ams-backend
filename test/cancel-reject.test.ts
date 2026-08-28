@@ -34,6 +34,7 @@ import {
   makeRequest,
   makeUser,
   resetDb,
+  TEST_COMPANY,
 } from './helpers/factory';
 
 let userId: number;
@@ -166,7 +167,7 @@ describe('บัญชีตีกลับรายชิ้น (reject)', () =
     expect(done.data.find((d) => d.id === s.requestId)).toBeUndefined();
   });
 
-  // ★ ป้าย "แก้ไขแล้ว" ของฝั่งบัญชี — ต้องมีคอลัมน์แยกเก็บ เพราะ update() ล้าง rejectedAt ทิ้ง
+  // ★ ป้าย "แก้ไขแล้ว" ของฝั่งบัญชี — ต้องมีคอลัมน์แยกเก็บ เพราะ update( {}, {}, {}) ล้าง rejectedAt ทิ้ง
   // ตอนผู้ขอแก้ ถ้าไม่เก็บไว้ บัญชีจะแยกไม่ออกว่าชิ้นไหนคือของที่เพิ่งแก้กลับมา
   test('แก้ชิ้นที่ถูกตีกลับ → ขึ้นป้าย "แก้ไขแล้ว" จนกว่าจะออกเลข', async () => {
     const s = await approved('PO-R7');
@@ -468,7 +469,7 @@ describe('ป้ายสถานะต้องอ่านจากใบเ�
     expect(bad.rejectedRole).toBe('MANAGER');
     expect(bad.rejectedByName).toBe(await employeeNameOf(chain.managerEmployeeId));
 
-    // ★ ตีกลับแล้วต้องแก้ได้จริง — เคยพังตรงนี้ (update() ยอมเฉพาะใบ DRAFT)
+    // ★ ตีกลับแล้วต้องแก้ได้จริง — เคยพังตรงนี้ (update( {}, {}, {}) ยอมเฉพาะใบ DRAFT)
     await update(a1.id, { serialNumber: 'SN-แก้แล้ว' }, userId);
   });
 });
@@ -528,7 +529,7 @@ describe('QR ของสติกเกอร์', () => {
     await assignAssetNumber(s.requestId, s.assetIds[0]!, 'COM-775-26-400', financeId);
 
     const row = await db.query.asset.findFirst({ where: eq(asset.id, s.assetIds[0]!) });
-    expect(row!.qrCode).toBe(assetQrUrl('COM-775-26-400'));
+    expect(row!.qrCode).toBe(assetQrUrl(TEST_COMPANY, 'COM-775-26-400'));
     expect(row!.qrCode).toContain('COM-775-26-400');
   });
 
@@ -552,7 +553,7 @@ describe('QR ของสติกเกอร์', () => {
     const moved = await assignAssetNumber(s.requestId, s.assetIds[1]!, 'COM-775-26-402', financeId);
     expect(moved.asset.assetNumber).toBe('COM-775-26-402');
     const row = await db.query.asset.findFirst({ where: eq(asset.id, s.assetIds[1]!) });
-    expect(row!.qrCode).toBe(assetQrUrl('COM-775-26-402'));
+    expect(row!.qrCode).toBe(assetQrUrl(TEST_COMPANY, 'COM-775-26-402'));
   });
 
   test('แก้เลขทับของเดิม = QR ตามไปที่เลขใหม่ ไม่ค้างของเก่า', async () => {
@@ -561,7 +562,7 @@ describe('QR ของสติกเกอร์', () => {
     await assignAssetNumber(s.requestId, s.assetIds[0]!, 'COM-775-26-404', financeId);
 
     const row = await db.query.asset.findFirst({ where: eq(asset.id, s.assetIds[0]!) });
-    expect(row!.qrCode).toBe(assetQrUrl('COM-775-26-404'));
+    expect(row!.qrCode).toBe(assetQrUrl(TEST_COMPANY, 'COM-775-26-404'));
   });
 
   test('ปิดถาวรแล้วปลดคืน = QR อยู่ครบ (เลขไม่ได้ถูกล้าง ต่างจากตีกลับ)', async () => {
@@ -570,11 +571,11 @@ describe('QR ของสติกเกอร์', () => {
     await cancelAsset(s.requestId, s.assetIds[0]!, 'ส่งคืนผู้ขาย', financeId);
 
     const cancelled = await db.query.asset.findFirst({ where: eq(asset.id, s.assetIds[0]!) });
-    expect(cancelled!.qrCode).toBe(assetQrUrl('COM-775-26-405'));
+    expect(cancelled!.qrCode).toBe(assetQrUrl(TEST_COMPANY, 'COM-775-26-405'));
 
     await uncancelAsset(s.requestId, s.assetIds[0]!, financeId);
     const back = await db.query.asset.findFirst({ where: eq(asset.id, s.assetIds[0]!) });
     expect(back!.lifecycle).toBe('REGISTERED');
-    expect(back!.qrCode).toBe(assetQrUrl('COM-775-26-405'));
+    expect(back!.qrCode).toBe(assetQrUrl(TEST_COMPANY, 'COM-775-26-405'));
   });
 })

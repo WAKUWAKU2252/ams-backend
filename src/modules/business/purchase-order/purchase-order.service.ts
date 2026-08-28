@@ -169,6 +169,7 @@ export async function findAll() {
  */
 export type PoApprovalTarget = {
   departmentId: number | null;
+  departmentName: string |null
   /** employee.id ของหัวหน้า — ตัวที่ส่งไปกับใบแล้ว Teams เด้งกลับมาเป็น approvedBy */
   managerEmployeeId: number | null;
   /** user.id ของหัวหน้า — ตัวที่ลง asset_request.assignedManagerId (FK ชี้ user ไม่ใช่ employee) */
@@ -186,6 +187,7 @@ export type PoApprovalTarget = {
 
 const NO_APPROVAL_TARGET: PoApprovalTarget = {
   departmentId: null,
+  departmentName:null,
   managerEmployeeId: null,
   managerUserId: null,
   managerFirstName: null,
@@ -207,14 +209,18 @@ export async function findApprovalTarget(ownerPrId: number | null): Promise<PoAp
 
   const departmentId = emp.departmentId;
   const dept = await db.query.department.findFirst({
-    columns: { managerId: true },
+    columns: { managerId: true, name: true },
     where: (table, { eq }) => eq(table.id, departmentId),
   });
-  if (!dept?.managerId) return { ...NO_APPROVAL_TARGET, departmentId };
+
+  // ชื่อแผนกต้องหยิบก่อนเช็คหัวหน้า — สองอย่างนี้ขาดกันคนละเรื่อง
+  // แผนกที่ยังไม่ตั้งหัวหน้าก็ยังมีชื่อ และหน้าจอต้องโชว์ชื่อได้ตามปกติ
+  // (เดิม return ทางไม่มีหัวหน้าออกไปก่อนบรรทัดนี้ ชื่อแผนกจึงเป็น null ทั้งที่มีอยู่)
+  const departmentName = dept?.name ?? null;
+  if (!dept?.managerId) return { ...NO_APPROVAL_TARGET, departmentId, departmentName };
 
   const managerEmployeeId = dept.managerId;
-  // ชื่อไทยแยกสองคอลัมน์ตาม schema (คอลัมน์ name ถูกถอดไปแล้วใน 0005)
-  // ส่งแยกไปให้ฝั่งเรียกประกอบเอง อย่าประกอบเป็นชื่อเต็มที่นี่
+
   const manager = await db.query.employee.findFirst({
     columns: {
       firstName: true,
@@ -242,6 +248,7 @@ export async function findApprovalTarget(ownerPrId: number | null): Promise<PoAp
 
   return {
     departmentId,
+    departmentName,
     managerEmployeeId,
     managerUserId: account?.id ?? null,
     managerFirstName: manager?.firstName ?? null,
@@ -272,12 +279,10 @@ export async function findOneOrFail(poNumber: string) {
   return {
     ...po,
     departmentId: target.departmentId,
+    departmentName: target.departmentName,
     items,
     receivedStatus: toReceivedStatus(items),
     registrationStatus: toRegistrationStatus(items),
-    // ชื่อ field ฝั่ง API คงเดิม (frontend + Teams payload ผูกอยู่) — managerId ที่ส่งออก
-    // เป็น employee.id เพราะเป็นตัวที่ Teams เด้งกลับมาเป็น approvedBy
-    // ส่วน managerUserId ไม่ส่งออก: ใช้ภายในตอน submit เท่านั้น
     managerId: target.managerEmployeeId,
     managerFirstName: target.managerFirstName,
     managerLastName: target.managerLastName,
@@ -286,8 +291,13 @@ export async function findOneOrFail(poNumber: string) {
 }
 
 export async function findPage({ page, limit, search }: FindPageParams) {
+  // ── ค้นแบบ "มีอยู่ในสตริง" ไม่ใช่ "ขึ้นต้นด้วย" (0021)
+  //
+  // ตั้งแต่เลข PO เก็บพร้อม prefix ('APO-62605007') การค้นแบบขึ้นต้นทำให้คนที่พิมพ์
+  // เลขเปล่า '62605007' ตามความเคยชินหาไม่เจอเลย ทั้งที่ใบนั้นมีอยู่
+  // ยอมแลกกับการที่ pg ใช้ index ไม่ได้ — ตาราง PO มีหลักร้อยแถว ไม่ใช่คอขวด
   const where = search
-    ? or(ilike(purchaseOrder.poNumber, `${search}%`), ilike(purchaseOrder.vendorName, `${search}%`))
+    ? or(ilike(purchaseOrder.poNumber, `%${search}%`), ilike(purchaseOrder.vendorName, `%${search}%`))
     : undefined;
 
   const [rows, totalResult] = await Promise.all([

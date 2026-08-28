@@ -23,6 +23,15 @@ export interface DashboardScope {
   departmentName: string | null;
   /** true = หน้าจอต้องล็อกช่องเลือกแผนก (เลือกแผนกอื่นไปก็ไม่มีผล backend ทิ้งอยู่ดี) */
   locked: boolean;
+  /**
+   * บริษัทที่ตัวเลขชุดนี้นับมา — null = รวมทุกบริษัท
+   *
+   * ★ ไม่ใช่แกนของสิทธิ์ ต่างจาก departmentId — ทุก role เลือกบริษัทได้อิสระ
+   *   (มูลค่ารายแผนกคือของที่บริษัทหวง ส่วน "ของชิ้นนี้เป็นของบริษัทไหน" ไม่ใช่)
+   *   จึงไม่มี companyLocked คู่กับ locked
+   */
+  companyCode: string | null;
+  companyName: string | null;
 }
 
 export interface DashboardTotals {
@@ -96,6 +105,54 @@ export interface DepartmentSummary {
   netBookValue: number | null;
 }
 
+/**
+ * หนึ่งแถวต่อหนึ่งบริษัท — โครงเดียวกับ DepartmentSummary แต่คนละแกน
+ *
+ * ★ ก้อนนี้ **ไม่ถูกกรองด้วยบริษัทที่เลือกอยู่** (ต่างจาก byDepartment ที่ถูกกรอง)
+ *   เพราะหน้าจอเอาไปทำตัวเลือกใน dropdown ด้วย ถ้ากรองตามที่เลือก พอผู้ใช้เลือก UBP
+ *   ลิสต์จะเหลือ UBP ตัวเดียว แล้วเขาจะกดกลับไป UBA ไม่ได้อีกเลย
+ *   ผลข้างเคียงที่ต้องรู้: sum(byCompany.assets) จะเท่ากับ totals.assets เฉพาะตอน
+ *   ที่ยังไม่ได้เลือกบริษัทเท่านั้น — ตัวที่ต้องกระทบยอดกับ totals เสมอคือ byDepartment
+ *
+ * บริษัทที่ขึ้นในลิสต์: บริษัทที่เปิดใช้งานและต่อ SAP อยู่ (= มีทางจะมีของ)
+ * หรือบริษัทที่มีของค้างอยู่จริงแม้ปิดใช้งานไปแล้ว — กติกาเดียวกับ byDepartment
+ */
+export interface CompanySummary {
+  companyCode: string;
+  companyName: string;
+  /** 0 ได้ = บริษัทนี้ยังไม่มีสินทรัพย์ในทะเบียนสักชิ้น (ไม่ใช่ข้อมูลหาย) */
+  assets: number;
+  active: number;
+  /** null เมื่อไม่มีชิ้นไหนของบริษัทนี้ที่มีตัวเลขบัญชีครบ */
+  bookedCost: number | null;
+  accumulatedDepreciation: number | null;
+  netBookValue: number | null;
+}
+
+/**
+ * การกระจายของอายุคงเหลือในแผนกหนึ่ง — เอาไว้ตอบว่า "ของแผนกนี้ใกล้หมดอายุกันเยอะแค่ไหน"
+ *
+ * ★ คิดเฉพาะตอนเลือกแผนกเดียว (remainingLife เป็น null เมื่อดูทุกแผนก) — รวมทั้งบริษัท
+ *   แล้วกราฟจะกลายเป็นรูปเดียวกันทุกครั้งจนไม่มีใครอ่าน และไม่มีใครทำอะไรกับมันได้
+ *   คนที่ต้องใช้คือหัวหน้าแผนกที่วางแผนงบเปลี่ยนของปีหน้า
+ *
+ * ★ สองช่องล่างแยกออกจาก buckets โดยตั้งใจ ห้ามเอาไปวาดรวมเป็นแท่งบนแกนเวลา
+ *   "ไม่คิดค่าเสื่อม" (ที่ดิน) กับ "ไม่มีข้อมูล" ไม่ใช่ช่วงเวลา วางบนแกนเดียวกันคือโกหก
+ */
+export interface RemainingLifeBucket {
+  label: string;
+  count: number;
+}
+
+export interface DashboardRemainingLife {
+  /** เรียงตามแกนเวลาแล้ว — ฝั่งจอวาดตามลำดับนี้ได้เลย ไม่ต้องจัดเอง */
+  buckets: RemainingLifeBucket[];
+  /** usefulLifeMonths = 0 — ของที่ไม่คิดค่าเสื่อมตั้งแต่แรก (ที่ดิน) ไม่มีวันหมดอายุ */
+  noDepreciation: number;
+  /** ไม่มีแถวบัญชี หรือ SAP ไม่ได้ให้อายุคงเหลือมา — ตอบไม่ได้ ไม่ใช่ศูนย์ */
+  noData: number;
+}
+
 export interface DashboardOverview {
   scope: DashboardScope;
   totals: DashboardTotals;
@@ -103,8 +160,14 @@ export interface DashboardOverview {
   status: DashboardStatus;
   /** สรุปรายแผนกในขอบเขตเดียวกับ totals — กรองแผนกเดียวอยู่ก็จะเหลือแถวเดียว */
   byDepartment: DepartmentSummary[];
+  /** สรุปรายบริษัท — ไม่ถูกกรองด้วยบริษัทที่เลือก ดูเหตุผลที่ CompanySummary */
+  byCompany: CompanySummary[];
+  /** null = ยังไม่ได้เลือกแผนก จึงไม่คิดให้ (ดูเหตุผลที่ DashboardRemainingLife) */
+  remainingLife: DashboardRemainingLife | null;
 }
 
 export interface DashboardOverviewInput {
   departmentId?: number;
+  /** รหัสบริษัท (company.code) เช่น 'UBA' — ไม่ส่ง = รวมทุกบริษัท */
+  companyCode?: string;
 }

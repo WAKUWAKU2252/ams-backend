@@ -16,7 +16,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '@intrastucture/db';
 import { asset, assetAccounting, department } from '@intrastucture/db/schema';
 import * as dashboardService from '@modules/business/dashboard/dashboard.service';
-import { makeDepartment, makeEmployee, makeLocation, makeUser, resetDb } from './helpers/factory';
+import { makeDepartment, makeEmployee, makeLocation, makeUser, resetDb, TEST_COMPANY } from './helpers/factory';
 
 type Lifecycle = 'DRAFT' | 'REGISTERED' | 'CANCELLED';
 type Status = 'Active' | 'Inactive' | 'Under Maintenance' | 'Lost' | 'Disposed';
@@ -31,6 +31,8 @@ let locationId = 0;
  */
 async function makeAsset(opts: {
   departmentId?: number | null;
+  /** ไม่ระบุ = TEST_COMPANY (UBA) — migration 0021 seed ทั้ง UBA และ UBP ไว้แล้ว */
+  companyCode?: string;
   lifecycle?: Lifecycle;
   status?: Status;
   deleted?: boolean;
@@ -39,6 +41,7 @@ async function makeAsset(opts: {
     .insert(asset)
     .values({
       origin: 'SAP_LEGACY',
+      companyCode: opts.companyCode ?? TEST_COMPANY,
       assetNumber: `TST-${crypto.randomUUID().slice(0, 8)}`,
       description: 'ของทดสอบ',
       locationId,
@@ -57,6 +60,10 @@ async function makeAccounting(
     fiscalYear?: number;
     bookedCost?: number | null;
     accumulatedDepreciation?: number | null;
+    /** 0 = ไม่คิดค่าเสื่อมเลย (ที่ดิน) — คนละเรื่องกับ remainingLifeMonths = 0 */
+    usefulLifeMonths?: number | null;
+    /** 0 = ตัดค่าเสื่อมครบแล้ว */
+    remainingLifeMonths?: number | null;
   } = {},
 ) {
   await db.insert(assetAccounting).values({
@@ -66,8 +73,8 @@ async function makeAccounting(
     accumulatedDepreciation:
       over.accumulatedDepreciation === undefined ? 400 : over.accumulatedDepreciation,
     salvageValue: 1,
-    usefulLifeMonths: 60,
-    remainingLifeMonths: 12,
+    usefulLifeMonths: over.usefulLifeMonths === undefined ? 60 : over.usefulLifeMonths,
+    remainingLifeMonths: over.remainingLifeMonths === undefined ? 12 : over.remainingLifeMonths,
     depreciationMethod: '01 Straight',
   });
 }
@@ -90,7 +97,7 @@ describe('ขอบเขตตาม role', () => {
     await makeAsset({ departmentId: mine });
     await makeAsset({ departmentId: other });
 
-    const res = await dashboardService.overview(asRole(userId, 'EMPLOYEE'));
+    const res = await dashboardService.overview(asRole(userId, 'EMPLOYEE'), {});
 
     expect(res.scope.kind).toBe('OWN_DEPARTMENT');
     expect(res.scope.departmentId).toBe(mine);
@@ -131,7 +138,7 @@ describe('ขอบเขตตาม role', () => {
     await makeAsset({ departmentId: b });
     await makeAsset({ departmentId: null });
 
-    const res = await dashboardService.overview(asRole(userId, role));
+    const res = await dashboardService.overview(asRole(userId, role), {});
 
     expect(res.scope.kind).toBe('ALL');
     expect(res.scope.departmentId).toBeNull();
@@ -168,7 +175,7 @@ describe('ขอบเขตตาม role', () => {
     await makeAsset({ departmentId: dep });
     const userId = await makeUser({ roleName: 'EMPLOYEE' });
 
-    const res = await dashboardService.overview(asRole(userId, 'EMPLOYEE'));
+    const res = await dashboardService.overview(asRole(userId, 'EMPLOYEE'), {});
 
     expect(res.scope.kind).toBe('UNLINKED');
     expect(res.totals.assets).toBe(0);
@@ -187,7 +194,7 @@ describe('ชิ้นที่ถูกนับ', () => {
     await makeAsset({ departmentId: dep, lifecycle: 'CANCELLED' });
     await makeAsset({ departmentId: dep, deleted: true });
 
-    const res = await dashboardService.overview(asRole(userId, 'ADMIN'));
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {});
     expect(res.totals.assets).toBe(1);
   });
 
@@ -198,7 +205,7 @@ describe('ชิ้นที่ถูกนับ', () => {
     await makeAsset({ departmentId: dep });
     await makeAsset({ departmentId: null });
 
-    const res = await dashboardService.overview(asRole(userId, 'ADMIN'));
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {});
 
     expect(res.totals.assets).toBe(2);
     const noDept = res.byDepartment.find((d) => d.departmentId === null);
@@ -217,7 +224,7 @@ describe('สรุปรายแผนก — แผนกที่ยัง�
     const empty = await makeDepartment('แผนกไม่มีของ');
     await makeAsset({ departmentId: withAssets });
 
-    const res = await dashboardService.overview(asRole(userId, 'ADMIN'));
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {});
 
     const row = res.byDepartment.find((d) => d.departmentId === empty);
     expect(row).toBeDefined();
@@ -235,7 +242,7 @@ describe('สรุปรายแผนก — แผนกที่ยัง�
     await makeAsset({ departmentId: big });
     await makeAsset({ departmentId: big });
 
-    const res = await dashboardService.overview(asRole(userId, 'ADMIN'));
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {});
 
     expect(res.byDepartment[0]!.departmentId).toBe(big);
     expect(res.byDepartment.at(-1)!.assets).toBe(0);
@@ -250,7 +257,7 @@ describe('สรุปรายแผนก — แผนกที่ยัง�
     await makeAsset({ departmentId: closed });
     await makeAsset({ departmentId: closed });
 
-    const res = await dashboardService.overview(asRole(userId, 'ADMIN'));
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {});
 
     expect(res.byDepartment.find((d) => d.departmentId === closed)?.assets).toBe(2);
     expect(res.byDepartment.reduce((sum, d) => sum + d.assets, 0)).toBe(res.totals.assets);
@@ -261,7 +268,7 @@ describe('สรุปรายแผนก — แผนกที่ยัง�
     const closed = await makeDepartment('แผนกที่ยุบและว่าง');
     await db.update(department).set({ isActive: false }).where(eq(department.id, closed));
 
-    const res = await dashboardService.overview(asRole(userId, 'ADMIN'));
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {});
 
     expect(res.byDepartment.find((d) => d.departmentId === closed)).toBeUndefined();
   });
@@ -289,7 +296,7 @@ describe('สรุปรายแผนก — แผนกที่ยัง�
     await makeAsset({ departmentId: dep, lifecycle: 'DRAFT' });
     await makeAsset({ departmentId: dep, deleted: true });
 
-    const res = await dashboardService.overview(asRole(userId, 'ADMIN'));
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {});
 
     const row = res.byDepartment.find((d) => d.departmentId === dep);
     expect(row?.assets).toBe(0);
@@ -308,7 +315,7 @@ describe('สรุปรายแผนก — แผนกที่ยัง�
     await makeAsset({ departmentId: closed });
     await makeAsset({ departmentId: null });
 
-    const res = await dashboardService.overview(asRole(userId, 'ADMIN'));
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {});
 
     expect(res.totals.assets).toBe(4);
     expect(res.byDepartment.reduce((sum, d) => sum + d.assets, 0)).toBe(4);
@@ -329,7 +336,7 @@ describe('ยอดเงิน', () => {
       accumulatedDepreciation: 1000.25,
     });
 
-    const res = await dashboardService.overview(asRole(userId, 'FINANCE'));
+    const res = await dashboardService.overview(asRole(userId, 'FINANCE'), {});
 
     expect(res.totals.valued).toBe(2);
     expect(res.totals.unvalued).toBe(0);
@@ -360,7 +367,7 @@ describe('ยอดเงิน', () => {
     // ไม่มีแถวบัญชีเลย
     await makeAsset({ departmentId: dep });
 
-    const res = await dashboardService.overview(asRole(userId, 'FINANCE'));
+    const res = await dashboardService.overview(asRole(userId, 'FINANCE'), {});
 
     expect(res.totals.assets).toBe(3);
     expect(res.totals.valued).toBe(1);
@@ -375,7 +382,7 @@ describe('ยอดเงิน', () => {
     const dep = await makeDepartment();
     await makeAsset({ departmentId: dep });
 
-    const res = await dashboardService.overview(asRole(userId, 'FINANCE'));
+    const res = await dashboardService.overview(asRole(userId, 'FINANCE'), {});
 
     expect(res.totals.assets).toBe(1);
     expect(res.totals.bookedCost).toBeNull();
@@ -392,7 +399,7 @@ describe('ยอดเงิน', () => {
       accumulatedDepreciation: 0,
     });
 
-    const res = await dashboardService.overview(asRole(userId, 'FINANCE'));
+    const res = await dashboardService.overview(asRole(userId, 'FINANCE'), {});
 
     expect(res.totals.valued).toBe(1);
     expect(res.totals.accumulatedDepreciation).toBe(0);
@@ -411,7 +418,7 @@ describe('สถานะ active/inactive', () => {
     await makeAsset({ departmentId: dep, status: 'Inactive' });
     await makeAsset({ departmentId: dep, status: 'Under Maintenance' });
 
-    const res = await dashboardService.overview(asRole(userId, 'ADMIN'));
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {});
 
     expect(res.status.active).toBe(3);
     expect(res.status.inactive).toBe(2);
@@ -427,7 +434,7 @@ describe('สถานะ active/inactive', () => {
   test('ไม่มีชิ้นเลย → เปอร์เซ็นต์เป็น null ไม่ใช่ 0', async () => {
     const userId = await makeUser({ roleName: 'ADMIN' });
 
-    const res = await dashboardService.overview(asRole(userId, 'ADMIN'));
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {});
 
     expect(res.status.activePercent).toBeNull();
     expect(res.status.inactivePercent).toBeNull();
@@ -448,11 +455,330 @@ describe('ความสดของตัวเลขบัญชี', () => {
     await makeAccounting(await makeAsset({ departmentId: dep }), { fiscalYear: thisYear - 4 });
     await makeAsset({ departmentId: dep });
 
-    const res = await dashboardService.overview(asRole(userId, 'FINANCE'));
+    const res = await dashboardService.overview(asRole(userId, 'FINANCE'), {});
 
     expect(res.freshness.fiscalYear).toBe(thisYear);
     expect(res.freshness.currentYearCount).toBe(1);
     expect(res.freshness.staleCount).toBe(2);
     expect(res.freshness.noDataCount).toBe(1);
+  });
+});
+
+// ═══ กรองตามบริษัท ═══
+//
+// ★ ทำไมต้องมีเทสต์ชุดนี้: บริษัทเป็นแกนที่สองที่เพิ่งเพิ่มเข้ามา และมันต้องถูกส่งต่อไป
+//   ทุกคิวรีในไฟล์ service ไม่ใช่แค่คิวรี totals — ถ้าลืมที่ใดที่หนึ่ง ตัวเลขบนหน้าจะไม่
+//   กระทบยอดกัน ซึ่งเป็นอาการที่มองด้วยตาไม่เห็นจนกว่าจะมีคนบวกเลขตาม
+describe('กรองตามบริษัท', () => {
+  test('ไม่ส่ง companyCode → นับทุกบริษัท', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    await makeAsset({ companyCode: 'UBA' });
+    await makeAsset({ companyCode: 'UBA' });
+    await makeAsset({ companyCode: 'UBP' });
+
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {});
+
+    expect(res.scope.companyCode).toBeNull();
+    expect(res.scope.companyName).toBeNull();
+    expect(res.totals.assets).toBe(3);
+  });
+
+  test('ส่ง companyCode → นับเฉพาะบริษัทนั้น และบอกกลับว่าเป็นบริษัทไหน', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    await makeAsset({ companyCode: 'UBA' });
+    await makeAsset({ companyCode: 'UBA' });
+    await makeAsset({ companyCode: 'UBP' });
+
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), { companyCode: 'UBP' });
+
+    expect(res.scope.companyCode).toBe('UBP');
+    expect(res.scope.companyName).toBe('UBP');
+    expect(res.totals.assets).toBe(1);
+  });
+
+  // รหัสมั่วต้อง 404 ไม่ใช่คืนศูนย์เงียบ ๆ — ศูนย์อ่านว่า "บริษัทนี้ไม่มีของ" ซึ่งคนละเรื่อง
+  test('companyCode ที่ไม่มีในตาราง → 404 ไม่ใช่ตัวเลขศูนย์', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    await makeAsset({});
+
+    expect(
+      dashboardService.overview(asRole(userId, 'ADMIN'), { companyCode: 'NOPE' }),
+    ).rejects.toThrow();
+  });
+
+  test('ยอดเงินถูกกรองตามบริษัทด้วย ไม่ใช่แค่จำนวนชิ้น', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    const uba = await makeAsset({ companyCode: 'UBA' });
+    const ubp = await makeAsset({ companyCode: 'UBP' });
+    await makeAccounting(uba, { bookedCost: 1000, accumulatedDepreciation: 400 });
+    await makeAccounting(ubp, { bookedCost: 7000, accumulatedDepreciation: 2000 });
+
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), { companyCode: 'UBP' });
+
+    expect(res.totals.bookedCost).toBe(7000);
+    expect(res.totals.accumulatedDepreciation).toBe(2000);
+    expect(res.totals.netBookValue).toBe(5000);
+  });
+
+  // ★ ใจกลางของ describe นี้ — byDepartment ต้องกระทบยอดกับ totals เสมอ ทุกชุดตัวกรอง
+  //   ถ้าลืมส่งบริษัทเข้า summarizeByDepartment ข้อนี้จะจับได้ทันที
+  test('sum(byDepartment.assets) เท่ากับ totals.assets เมื่อกรองบริษัท', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    const a = await makeDepartment('แผนก ก');
+    const b = await makeDepartment('แผนก ข');
+    await makeAsset({ departmentId: a, companyCode: 'UBA' });
+    await makeAsset({ departmentId: a, companyCode: 'UBP' });
+    await makeAsset({ departmentId: b, companyCode: 'UBP' });
+    await makeAsset({ departmentId: b, companyCode: 'UBP' });
+
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), { companyCode: 'UBP' });
+
+    const sum = res.byDepartment.reduce((acc, r) => acc + r.assets, 0);
+    expect(res.totals.assets).toBe(3);
+    expect(sum).toBe(res.totals.assets);
+  });
+
+  test('กรองบริษัทกับกรองแผนกตัดกันทั้งสองแกน', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    const a = await makeDepartment('แผนก ก');
+    const b = await makeDepartment('แผนก ข');
+    await makeAsset({ departmentId: a, companyCode: 'UBA' });
+    await makeAsset({ departmentId: a, companyCode: 'UBP' });
+    await makeAsset({ departmentId: b, companyCode: 'UBP' });
+
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {
+      departmentId: a,
+      companyCode: 'UBP',
+    });
+
+    expect(res.totals.assets).toBe(1);
+  });
+
+  // พนักงานทั่วไปเลือกบริษัทได้ (ไม่ใช่แกนของสิทธิ์) แต่แผนกยังถูกล็อกอยู่เหมือนเดิม
+  test('EMPLOYEE เลือกบริษัทได้ แต่ยังถูกล็อกแผนกตัวเอง', async () => {
+    const mine = await makeDepartment('แผนกของฉัน');
+    const other = await makeDepartment('แผนกอื่น');
+    const emp = await makeEmployee({ departmentId: mine });
+    const userId = await makeUser({ roleName: 'EMPLOYEE', employeeId: emp });
+
+    await makeAsset({ departmentId: mine, companyCode: 'UBP' });
+    await makeAsset({ departmentId: mine, companyCode: 'UBA' });
+    await makeAsset({ departmentId: other, companyCode: 'UBP' });
+
+    const res = await dashboardService.overview(asRole(userId, 'EMPLOYEE'), {
+      departmentId: other,
+      companyCode: 'UBP',
+    });
+
+    expect(res.scope.departmentId).toBe(mine);
+    expect(res.scope.locked).toBe(true);
+    expect(res.scope.companyCode).toBe('UBP');
+    expect(res.totals.assets).toBe(1);
+  });
+});
+
+// ═══ byCompany — ทั้งตัวเลขเทียบบริษัทและตัวเลือกใน dropdown ═══
+describe('byCompany', () => {
+  test('แยกจำนวนและยอดเงินรายบริษัท', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    const uba = await makeAsset({ companyCode: 'UBA' });
+    await makeAsset({ companyCode: 'UBP' });
+    await makeAsset({ companyCode: 'UBP' });
+    await makeAccounting(uba, { bookedCost: 1000, accumulatedDepreciation: 400 });
+
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {});
+
+    const byCode = new Map(res.byCompany.map((c) => [c.companyCode, c]));
+    expect(byCode.get('UBA')!.assets).toBe(1);
+    expect(byCode.get('UBA')!.netBookValue).toBe(600);
+    expect(byCode.get('UBP')!.assets).toBe(2);
+    // ไม่มีชิ้นไหนของ UBP มีตัวเลขบัญชี → null ไม่ใช่ 0
+    expect(byCode.get('UBP')!.netBookValue).toBeNull();
+  });
+
+  // ★ ข้อที่ห้ามล้ม — หน้าจอเอา byCompany ไปทำตัวเลือกใน dropdown ถ้าก้อนนี้ถูกกรอง
+  //   ตามบริษัทที่เลือก ลิสต์จะยุบเหลือตัวเดียว แล้วผู้ใช้จะกดกลับไปบริษัทอื่นไม่ได้อีกเลย
+  test('เลือกบริษัทแล้ว byCompany ต้องยังมีครบทุกบริษัท', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    await makeAsset({ companyCode: 'UBA' });
+    await makeAsset({ companyCode: 'UBP' });
+
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), { companyCode: 'UBP' });
+
+    const codes = res.byCompany.map((c) => c.companyCode).sort();
+    expect(codes).toEqual(['UBA', 'UBP']);
+    // ตัวเลขในก้อนนี้ยังเป็นของจริงรายบริษัท ไม่ได้ถูกกรองให้เหลือแต่ UBP
+    expect(res.byCompany.find((c) => c.companyCode === 'UBA')!.assets).toBe(1);
+  });
+
+  // 5 ใน 7 บริษัทไม่มี SAP ให้ sync จึงไม่มีทางมีของ — ปล่อยขึ้นหมดจะได้ dropdown ที่มี
+  // ตัวเลือกตายอยู่ 5 อัน
+  test('บริษัทที่ไม่ได้ต่อ SAP และไม่มีของ ไม่ขึ้นในลิสต์', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    await makeAsset({ companyCode: 'UBA' });
+
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {});
+
+    const codes = res.byCompany.map((c) => c.companyCode);
+    expect(codes).toContain('UBA');
+    expect(codes).toContain('UBP'); // ต่อ SAP อยู่ ต้องขึ้นแม้ยังไม่มีของ
+    expect(codes).not.toContain('MIG');
+    expect(codes).not.toContain('KCC');
+  });
+
+  test('บริษัทที่ต่อ SAP แต่ยังไม่มีของ ขึ้นเป็น 0 ไม่ใช่หายไป', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    await makeAsset({ companyCode: 'UBA' });
+
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {});
+
+    const ubp = res.byCompany.find((c) => c.companyCode === 'UBP');
+    expect(ubp).toBeDefined();
+    expect(ubp!.assets).toBe(0);
+    expect(ubp!.bookedCost).toBeNull();
+  });
+
+  // byCompany ถูกกรองด้วยแผนก (ต่างจากบริษัท) — ไม่งั้นเลือกแผนกแล้วตัวเลขรายบริษัท
+  // จะเป็นของทั้งบริษัทซึ่งไม่ตรงกับการ์ดสรุปข้างบน
+  test('byCompany ถูกกรองตามแผนกที่เลือก', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    const a = await makeDepartment('แผนก ก');
+    const b = await makeDepartment('แผนก ข');
+    await makeAsset({ departmentId: a, companyCode: 'UBA' });
+    await makeAsset({ departmentId: b, companyCode: 'UBA' });
+
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), { departmentId: a });
+
+    expect(res.byCompany.find((c) => c.companyCode === 'UBA')!.assets).toBe(1);
+  });
+});
+
+// ═══ อายุคงเหลือรายแผนก (remainingLife) ═══
+//
+// ★ กับดักของชุดนี้คือ 0 มีสองความหมายคนละเรื่อง ขึ้นกับว่าอ่านคู่กับ usefulLifeMonths อะไร
+//   usefulLifeMonths = 0    → ไม่คิดค่าเสื่อมเลย (ที่ดิน) ไม่มีวันหมดอายุ
+//   remainingLifeMonths = 0 → ตัดค่าเสื่อมครบแล้ว
+//   ทั้งคู่มี remainingLifeMonths = 0 เหมือนกันเป๊ะ ถ้าไม่แยกจะนับที่ดินเป็น "ตัดครบแล้ว"
+describe('อายุคงเหลือรายแผนก', () => {
+  const bucket = (res: Awaited<ReturnType<typeof dashboardService.overview>>, label: string) =>
+    res.remainingLife?.buckets.find((b) => b.label === label)?.count;
+
+  test('ไม่เลือกแผนก → ไม่คิดให้ (null)', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    const dep = await makeDepartment('แผนก ก');
+    const id = await makeAsset({ departmentId: dep });
+    await makeAccounting(id, { usefulLifeMonths: 60, remainingLifeMonths: 24 });
+
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {});
+
+    expect(res.remainingLife).toBeNull();
+  });
+
+  test('เลือกแผนก → แบ่งช่วงตามอายุคงเหลือ', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    const dep = await makeDepartment('แผนก ก');
+    for (const months of [6, 12, 13, 30, 40, 55, 90]) {
+      const id = await makeAsset({ departmentId: dep });
+      await makeAccounting(id, { usefulLifeMonths: 120, remainingLifeMonths: months });
+    }
+
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), { departmentId: dep });
+
+    expect(bucket(res, '1–12 เดือน')).toBe(2); // 6, 12
+    expect(bucket(res, '13–24 เดือน')).toBe(1); // 13
+    expect(bucket(res, '25–36 เดือน')).toBe(1); // 30
+    expect(bucket(res, '37–48 เดือน')).toBe(1); // 40
+    expect(bucket(res, '49–60 เดือน')).toBe(1); // 55
+    expect(bucket(res, 'เกิน 60 เดือน')).toBe(1); // 90
+  });
+
+  // ★ ข้อที่ห้ามล้ม — ที่ดินกับของที่ตัดครบแล้วมีเลขเดียวกันเป๊ะ ต้องไปคนละช่อง
+  test('ที่ดิน (ไม่คิดค่าเสื่อม) ไม่ถูกนับเป็น "ตัดครบแล้ว"', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    const dep = await makeDepartment('แผนก ก');
+
+    const land = await makeAsset({ departmentId: dep });
+    await makeAccounting(land, { usefulLifeMonths: 0, remainingLifeMonths: 0 });
+
+    const done = await makeAsset({ departmentId: dep });
+    await makeAccounting(done, { usefulLifeMonths: 60, remainingLifeMonths: 0 });
+
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), { departmentId: dep });
+
+    expect(bucket(res, 'ตัดครบแล้ว')).toBe(1);
+    expect(res.remainingLife!.noDepreciation).toBe(1);
+  });
+
+  test('ชิ้นที่ไม่มีแถวบัญชี ไปอยู่ noData ไม่ใช่ช่องใดช่องหนึ่ง', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    const dep = await makeDepartment('แผนก ก');
+    await makeAsset({ departmentId: dep }); // ไม่มีแถวบัญชี
+    const id = await makeAsset({ departmentId: dep });
+    await makeAccounting(id, { usefulLifeMonths: 60, remainingLifeMonths: 24 });
+
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), { departmentId: dep });
+
+    expect(res.remainingLife!.noData).toBe(1);
+    const sum = res.remainingLife!.buckets.reduce((acc, b) => acc + b.count, 0);
+    expect(sum).toBe(1);
+  });
+
+  // ★ ทุกชิ้นในแผนกต้องถูกนับที่ใดที่หนึ่งพอดีครั้งเดียว ไม่หายไปเฉย ๆ และไม่นับซ้ำ
+  test('buckets + noDepreciation + noData รวมกันเท่ากับจำนวนชิ้นในแผนก', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    const dep = await makeDepartment('แผนก ก');
+
+    const specs = [
+      { useful: 60, remaining: 0 },
+      { useful: 60, remaining: 10 },
+      { useful: 60, remaining: 70 },
+      { useful: 0, remaining: 0 },
+      { useful: 60, remaining: null },
+    ];
+    for (const s of specs) {
+      const id = await makeAsset({ departmentId: dep });
+      await makeAccounting(id, { usefulLifeMonths: s.useful, remainingLifeMonths: s.remaining });
+    }
+    await makeAsset({ departmentId: dep }); // ไม่มีแถวบัญชี
+
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), { departmentId: dep });
+    const life = res.remainingLife!;
+    const total =
+      life.buckets.reduce((acc, b) => acc + b.count, 0) + life.noDepreciation + life.noData;
+
+    expect(res.totals.assets).toBe(6);
+    expect(total).toBe(res.totals.assets);
+  });
+
+  test('นับเฉพาะแผนกที่เลือก ไม่ปนแผนกอื่น', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    const a = await makeDepartment('แผนก ก');
+    const b = await makeDepartment('แผนก ข');
+
+    const mine = await makeAsset({ departmentId: a });
+    await makeAccounting(mine, { usefulLifeMonths: 60, remainingLifeMonths: 10 });
+    const other = await makeAsset({ departmentId: b });
+    await makeAccounting(other, { usefulLifeMonths: 60, remainingLifeMonths: 10 });
+
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), { departmentId: a });
+
+    expect(bucket(res, '1–12 เดือน')).toBe(1);
+  });
+
+  test('กรองบริษัทด้วยแล้วยังตัดกันถูก', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    const dep = await makeDepartment('แผนก ก');
+
+    const uba = await makeAsset({ departmentId: dep, companyCode: 'UBA' });
+    await makeAccounting(uba, { usefulLifeMonths: 60, remainingLifeMonths: 10 });
+    const ubp = await makeAsset({ departmentId: dep, companyCode: 'UBP' });
+    await makeAccounting(ubp, { usefulLifeMonths: 60, remainingLifeMonths: 10 });
+
+    const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {
+      departmentId: dep,
+      companyCode: 'UBP',
+    });
+
+    expect(bucket(res, '1–12 เดือน')).toBe(1);
   });
 });
