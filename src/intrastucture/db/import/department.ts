@@ -1,8 +1,14 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// นำเข้า department จาก docs/department-sap.csv
+// นำเข้า department จาก docs/<ไฟล์>.csv — ทีละบริษัท
 //
-//   bun run db:import:department            → dry-run (ไม่แตะ DB) ← ค่าเริ่มต้น
+//   bun run db:import:department            → dry-run ของ UBA (ไม่แตะ DB) ← ค่าเริ่มต้น
 //   bun run db:import:department --commit   → เขียนจริง
+//   bun run db:import:department --company=MIG --file=department-mig.csv [--commit]
+//
+// ★ ต้องระบุบริษัทเสมอตั้งแต่ 0024 — departmentId เป็นผังของแต่ละบริษัท ไม่ใช่เลขที่
+//   ไม่ซ้ำกันทั้งเครือ (MIG ชนกับ UBA 32 จาก 33 รหัส) คีย์ธรรมชาติจึงเป็น
+//   (companyCode, departmentId) และสคริปต์นี้เขียนได้ทีละบริษัทเท่านั้น
+//   — ค่าเริ่มต้นเป็น UBA เพื่อให้คำสั่งเดิมที่คนพิมพ์อยู่ยังทำสิ่งเดิมเป๊ะ
 //
 // ที่มาของข้อมูล:
 //   departmentId = OUDP.Code (SAP)  ← คีย์ที่ OHEM.dept ชี้มา ใช้ผูก employee รอบถัดไป
@@ -21,8 +27,15 @@ import { readCsv, toBool } from './csv';
 // อ้างจากตำแหน่งไฟล์นี้ ไม่ใช่ cwd — จะได้รันจากโฟลเดอร์ไหนก็เจอไฟล์เดียวกัน
 // decodeURIComponent: pathname เป็น URL-encoded ถ้าพาธมีช่องว่างจะได้ %20 แล้วเปิดไฟล์ไม่เจอ
 // replace: Windows ได้ "/C:/..." นำหน้าด้วย slash ซึ่ง Bun.file เปิดไม่ได้
+const arg = (name: string): string | undefined =>
+  process.argv.find((a) => a.startsWith(`--${name}=`))?.split('=').slice(1).join('=');
+
+/** บริษัทเจ้าของแถวที่จะเขียนรอบนี้ — ไฟล์หนึ่งใบ = บริษัทเดียว */
+const COMPANY = (arg('company') ?? 'UBA').toUpperCase();
+const CSV_NAME = arg('file') ?? 'department-sap.csv';
+
 const CSV = decodeURIComponent(
-  new URL('../../../../../docs/department-sap.csv', import.meta.url).pathname,
+  new URL(`../../../../../docs/${CSV_NAME}`, import.meta.url).pathname,
 ).replace(/^\/([A-Za-z]:)/, '$1');
 
 const COMMIT = process.argv.includes('--commit');
@@ -57,9 +70,24 @@ function load(raw: Record<string, string>[]): Row[] {
   return rows;
 }
 
+/** นับเฉพาะของบริษัทที่กำลังนำเข้า — ตัวเลขรวมทั้งตารางอ่านแล้วบอกไม่ได้ว่ารอบนี้ทำอะไร */
 async function countDepartments(): Promise<number> {
-  const res = await db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM department`);
+  const res = await db.execute<{ n: number }>(
+    sql`SELECT count(*)::int AS n FROM department WHERE "companyCode" = ${COMPANY}`,
+  );
   return res.rows[0]?.n ?? 0;
+}
+
+/** บริษัทต้องมีอยู่จริงก่อน — FK จะจับให้อยู่แล้ว แต่ error ของ pg อ่านไม่รู้เรื่องว่าพิมพ์รหัสผิด */
+async function assertCompanyExists(): Promise<void> {
+  const res = await db.execute<{ n: number }>(
+    sql`SELECT count(*)::int AS n FROM company WHERE code = ${COMPANY}`,
+  );
+  if (!res.rows[0]?.n) {
+    throw new Error(
+      `ไม่มีบริษัทรหัส '${COMPANY}' ในตาราง company — เพิ่มแถวบริษัทก่อน แล้วค่อยนำเข้าแผนก`,
+    );
+  }
 }
 
 async function main() {
@@ -76,17 +104,19 @@ async function main() {
   // ยืนยันว่ากำลังคุยกับ DB ตัวไหนอยู่ — เครื่องนี้มี core_business (ของระบบอื่น 113 ตาราง)
   // อยู่ด้วย และ user ที่ใช้เป็น superuser ที่เขียนได้ทั้งสองฝั่ง
   const dbName = (await db.execute<{ db: string }>(sql`SELECT current_database() AS db`)).rows[0]?.db ?? '?';
+  await assertCompanyExists();
   const before = await countDepartments();
 
   console.log(`ไฟล์      : ${CSV}`);
-  console.log(`ฐานข้อมูล : ${dbName} (มี department อยู่แล้ว ${before} แถว)`);
+  console.log(`บริษัท    : ${COMPANY}`);
+  console.log(`ฐานข้อมูล : ${dbName} (มี department ของ ${COMPANY} อยู่แล้ว ${before} แถว)`);
   console.log(`อ่านได้   : ${rows.length} แถว`);
   console.table(rows.slice(0, 5));
 
   if (!COMMIT) {
     console.log(`\n🔍 dry-run — ยังไม่เขียนอะไรลง DB`);
-    console.log(`   จะ insert/update ${rows.length} แถว (ยึด departmentId เป็นคีย์)`);
-    console.log(`   รันจริง: bun run db:import:department --commit`);
+    console.log(`   จะ insert/update ${rows.length} แถวของ ${COMPANY} (คีย์ = companyCode + departmentId)`);
+    console.log(`   รันจริง: bun run db:import:department --company=${COMPANY} --file=${CSV_NAME} --commit`);
     return;
   }
 
@@ -95,15 +125,17 @@ async function main() {
   await db.transaction(async (tx) => {
     await tx
       .insert(department)
-      .values(rows)
+      .values(rows.map((r) => ({ ...r, companyCode: COMPANY })))
       .onConflictDoUpdate({
-        target: department.departmentId,
+        // คีย์คู่ ไม่ใช่ departmentId เดี่ยว — รหัสเดียวกันของคนละบริษัทคือคนละแผนก
+        // ถ้ายังเป็นคีย์เดี่ยว การนำเข้า MIG จะ "อัปเดตทับ" แผนกของ UBA 32 แถวแบบเงียบ ๆ
+        target: [department.companyCode, department.departmentId],
         set: { name: sql`excluded.name`, shortName: sql`excluded."shortName"`, updatedAt: sql`now()` },
       });
   });
 
   const after = await countDepartments();
-  console.log(`\n✅ เขียนแล้ว — department: ${before} → ${after} แถว (เพิ่ม ${after - before}, อัปเดต ${rows.length - (after - before)})`);
+  console.log(`\n✅ เขียนแล้ว — department ของ ${COMPANY}: ${before} → ${after} แถว (เพิ่ม ${after - before}, อัปเดต ${rows.length - (after - before)})`);
 }
 
 main()

@@ -287,7 +287,8 @@ export const sapAssetSyncEvent = pgTable(
 export const sapAssetUnknownNumber = pgTable(
   'sap_asset_unknown_number',
   {
-    // grain = สินทรัพย์หนึ่งชิ้น ไม่ใช่หนึ่งเลข — เลขห้ามซ้ำอยู่แล้ว (uq_asset_number)
+    // grain = สินทรัพย์หนึ่งชิ้น ไม่ใช่หนึ่งเลข — เลขซ้ำข้ามบริษัทได้ (คีย์คือ
+    // uq_asset_company_number ไม่ใช่เลขเดี่ยว ๆ) แถวนี้จึงต้องผูก id ไม่ใช่เลข
     // แต่ผูกด้วย id ทำให้ลบชิ้นทิ้งแล้วแถวนี้หายตามเองผ่าน FK ไม่ค้างเป็นขยะ
     assetId: integer().primaryKey().notNull(),
     // ก๊อปเลขมาเก็บด้วย ไม่ได้ join เอาตอนอ่าน — บัญชีต้องเห็นเลขที่ "เคยพิมพ์ไว้" ตรงนี้

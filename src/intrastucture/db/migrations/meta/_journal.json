@@ -155,6 +155,55 @@
       "when": 1787719490108,
       "tag": "0021_multi_company",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1788148801738,
+      "tag": "0022_floor_plan_polygon",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1788162727786,
+      "tag": "0023_plan_area_flag",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1788320328666,
+      "tag": "0024_lean_ultimates",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1788325002610,
+      "tag": "0025_careless_moonstone",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1788333527318,
+      "tag": "0026_daily_garia",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1788424192636,
+      "tag": "0027_asset_sap_created_date",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1788495450176,
+      "tag": "0028_asset_location_out_plan",
+      "breakpoints": true
     }
   ]
 }

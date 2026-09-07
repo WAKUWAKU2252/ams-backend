@@ -1,0 +1,1 @@
+ALTER TABLE "asset_location" ADD COLUMN "outPlan" boolean DEFAULT false NOT NULL;

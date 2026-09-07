@@ -36,6 +36,25 @@ const COUNT_SQL = sql`
 `;
 
 async function main() {
+  // ── ★ สคริปต์นี้หมดหน้าที่แล้วตั้งแต่ 0025 — ห้ามรันอีก ────────────────────
+  //
+  // มันเขียน employee.ownerCodeUbp ซึ่งไม่ใช่แหล่งความจริงแล้ว (ไม่มีโค้ดไหนอ่าน และ
+  // คอลัมน์จะถูกลบใน migration ถัดไป) รันตอนนี้ = เขียนลงช่องที่ไม่มีใครดู แล้วเข้าใจผิด
+  // ว่าตัวตนฝั่ง UBP ถูกนำเข้าเรียบร้อยแล้ว ทั้งที่ employee_company ยังว่าง
+  //
+  // ทางที่ถูกตอนนี้เป็นสองขั้นแทน:
+  //   1. migration 0025 backfill แถวของ UBP ให้จาก ownerCodeUbp เดิม (departmentId = NULL)
+  //   2. docs/import-employee-company-ubp.sql เติม departmentId จาก Company.xlsx sheet UBP
+  //
+  // ไม่ลบไฟล์ทิ้งเพราะ docs/import-employee-ubp.sql ที่มันรันเป็นบันทึกว่าการจับคู่คน
+  // ข้ามสองฐานตัดสินกันด้วยเกณฑ์อะไร ซึ่งยังต้องอ่านย้อนได้
+  throw new Error(
+    'สคริปต์นี้ถูกแทนที่แล้วตั้งแต่ 0025 — ตัวตนฝั่ง UBP อยู่ในตาราง employee_company ไม่ใช่ ' +
+      'employee.ownerCodeUbp\n' +
+      '   → migration 0025 backfill ให้แล้ว จากนั้นรัน docs/import-employee-company-ubp.sql ' +
+      'เพื่อเติมแผนก',
+  );
+
   const dbName =
     (await db.execute<{ db: string }>(sql`SELECT current_database() AS db`)).rows[0]?.db ?? '?';
 

@@ -4,8 +4,8 @@
 // ซึ่ง pg บังคับ integrity ให้ไม่ได้เลย: ใส่ entityId ที่ไม่มีจริงก็ insert ผ่าน
 //
 // ทำไมไม่แยกเป็นตาราง invoice / asset_image: metadata เหมือนกันทุกคอลัมน์ แยกแล้ว
-// logic upload / soft delete / cleanup / ย้ายไป NAS ต้องทำซ้ำสองชุด และเอกสารชนิดที่ 3
-// (Movement) จะตามมาอีก — ใช้ docType แยกชนิดพอ ส่วนความปลอดภัยได้จาก composite FK
+// logic upload / soft delete / cleanup / ย้ายไป NAS ต้องทำซ้ำสองชุด และเอกสารชนิดถัดไป
+// ที่จะตามมาก็ต้องทำซ้ำอีก — ใช้ docType แยกชนิดพอ ส่วนความปลอดภัยได้จาก composite FK
 // ที่ฝั่ง grpo/asset ซึ่งอ้าง unique (id, docType) ข้างล่าง
 // ═══════════════════════════════════════════════════════════════════════════
 import { pgTable, pgEnum, uuid, varchar, integer, unique, foreignKey, index } from 'drizzle-orm/pg-core';
