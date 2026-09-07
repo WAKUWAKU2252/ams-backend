@@ -8,7 +8,7 @@ import { grpoRoutes } from "./modules/business/grpo";
 import { assetRoutes, assetPublicRoutes } from "./modules/business/asset";
 import { userRoutes } from "./modules/shared/user";
 import { syncRoutes } from "./modules/integrate/SAP";
-import { masterRoutes } from "./modules/business/master";
+import { masterRoutes, masterPublicRoutes } from "./modules/business/master";
 import { dashboardRoutes } from "./modules/business/dashboard";
 import { teamsRoutes } from "./modules/integrate/TEAMS/teams.routes";
 
@@ -18,6 +18,7 @@ export const createApp = () =>
     .use(setup)
     .get("/health", () => ({ status: "ok" }))
     .use(authRoutes)
+    .use(masterPublicRoutes)
     .use(masterRoutes)
     .use(dashboardRoutes)
     .use(purchaseOrderRoutes)

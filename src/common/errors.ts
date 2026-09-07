@@ -39,3 +39,13 @@ export class ForbiddenError extends AppError {
     super(message, 403);
   }
 }
+
+// 503 — เส้นทางนี้ยังใช้ไม่ได้เพราะ "ระบบยังไม่ถูกตั้งค่า" ไม่ใช่เพราะคำขอผิด
+//
+// แยกจาก 4xx โดยตั้งใจ: คนที่ต้องไปแก้คือคนดูแลระบบ (ไปเติม env) ไม่ใช่คนที่ยิงคำขอมา
+// — ถ้าตอบ 400/401 คนที่เจอจะเข้าใจว่าตัวเองส่งของผิดแล้วไล่แก้ผิดทาง
+export class ServiceUnavailableError extends AppError {
+  constructor(message: string) {
+    super(message, 503);
+  }
+}

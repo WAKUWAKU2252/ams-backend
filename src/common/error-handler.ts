@@ -16,8 +16,17 @@ export const errorHandler = new Elysia({ name: 'error-handler' }).onError(
       const details = error.all
         .map((e) => {
           const field = 'path' in e && e.path ? `${e.path.slice(1)}: ` : '';
-          const anyOf =
-            'schema' in e ? (e.schema as { anyOf?: { const?: unknown }[] }).anyOf : undefined;
+          const schema =
+            'schema' in e
+              ? (e.schema as { anyOf?: { const?: unknown }[]; error?: unknown })
+              : undefined;
+
+          // ★ schema ที่เขียนข้อความเองไว้ ชนะ summary ของ TypeBox เสมอ
+          //   จำเป็นกับ t.Union: summary มาตรฐานคือ "Value should be one of 'object', 'object'"
+          //   ซึ่งไม่บอกอะไรเลยว่าผิดตรงไหน (ทั้งสองรูปเป็น object เหมือนกัน) — ดู createAssetBody
+          if (typeof schema?.error === 'string') return `${field}${schema.error}`;
+
+          const anyOf = schema?.anyOf;
           if (anyOf && anyOf.length > 0 && anyOf.every((s) => s.const !== undefined)) {
             return `${field}must be one of: ${anyOf.map((s) => s.const).join(', ')}`;
           }

@@ -39,9 +39,29 @@ export const REGISTRAR_ROLES = ['FINANCE', 'ADMIN'] as const;
  *
  * ★ ชุดนี้คือ "ใครเห็นเงินของคนอื่น" ไม่ใช่แค่เรื่องความสะดวก — role ที่ไม่อยู่ในลิสต์
  *   จะถูกบังคับให้เห็นเฉพาะแผนกตัวเอง โดยที่ departmentId ที่ส่งมาใน query ถูกทิ้ง
- *   (ดู resolveScope) ไม่ใช่แค่ซ่อน dropdown ฝั่งหน้าจอ
+ *   (ดู resolveDepartmentScope) ไม่ใช่แค่ซ่อน dropdown ฝั่งหน้าจอ
  */
 export const DASHBOARD_ALL_DEPARTMENT_ROLES = ['MANAGER', 'FINANCE', 'ADMIN'] as const;
 
 /** สำหรับเช็คด้วย .includes() ซึ่งรับ readonly tuple ของ literal ไม่ได้ */
 export const DASHBOARD_ALL_DEPARTMENT_ROLE_LIST: string[] = [...DASHBOARD_ALL_DEPARTMENT_ROLES];
+
+/**
+ * role ที่เห็นตัวเลขบน Dashboard ของ "ทุกบริษัท"
+ *
+ * ค่าเท่ากับ DASHBOARD_ALL_DEPARTMENT_ROLES ตอนนี้ แต่ต้องเป็นคนละชุด ห้ามใช้ตัวนั้นซ้ำ —
+ * สองแกนนี้แยกจากกันจริงและมีสิทธิ์เดินคนละทางในอนาคต:
+ *   ALL_DEPARTMENT = "ใครดูมูลค่าของแผนกอื่นได้"
+ *   ALL_COMPANY    = "ใครดูมูลค่าของบริษัทอื่นในเครือได้"
+ *
+ * เคสที่จะทำให้สองชุดต่างกันมีอยู่จริงและเห็นได้ตั้งแต่ตอนนี้: MANAGER คุมแผนกในบริษัท
+ * เดียว การให้เขาดูข้ามแผนกจึงสมเหตุสมผล แต่การให้ดูข้ามบริษัทเป็นคนละเรื่อง วันที่
+ * ตัดสินใจแยก ให้แก้ที่ค่าตรงนี้ตัวเดียว ไม่ต้องไปไล่แก้ที่ resolveCompanyScope
+ *
+ * ★ role ที่ไม่อยู่ในลิสต์จะถูก **บังคับ** เป็นบริษัทตัวเอง โดย companyCode ที่ส่งมาใน
+ *   query ถูกทิ้ง (ดู resolveCompanyScope) ไม่ใช่แค่ปิด dropdown ฝั่งหน้าจอ
+ */
+export const DASHBOARD_ALL_COMPANY_ROLES = ['MANAGER', 'FINANCE', 'ADMIN'] as const;
+
+/** สำหรับเช็คด้วย .includes() ซึ่งรับ readonly tuple ของ literal ไม่ได้ */
+export const DASHBOARD_ALL_COMPANY_ROLE_LIST: string[] = [...DASHBOARD_ALL_COMPANY_ROLES];
