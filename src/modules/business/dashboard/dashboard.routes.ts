@@ -3,7 +3,7 @@
 //
 // ไม่มี requireRole ที่ระดับเส้นทางโดยตั้งใจ — ทุก role เปิดหน้า Dashboard ได้ แต่ "เห็นแค่ไหน"
 // ต่างกัน ซึ่งเป็นเรื่องของขอบเขตข้อมูล ไม่ใช่เรื่องเข้าถึงหน้าได้/ไม่ได้ ตัวบังคับอยู่ที่
-// resolveScope ใน service ซึ่งอ่าน role จาก token (ดูหัวไฟล์ dashboard.service.ts ข้อ 1)
+// resolveDepartmentScope / resolveCompanyScope ใน service ซึ่งอ่าน role จาก token (ดูหัวไฟล์ dashboard.service.ts ข้อ 1)
 import { Elysia } from 'elysia';
 import { dashboardOverviewQuery } from './dashboard.schema';
 import * as dashboardService from './dashboard.service';

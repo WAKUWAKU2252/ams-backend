@@ -26,12 +26,19 @@ export interface DashboardScope {
   /**
    * บริษัทที่ตัวเลขชุดนี้นับมา — null = รวมทุกบริษัท
    *
-   * ★ ไม่ใช่แกนของสิทธิ์ ต่างจาก departmentId — ทุก role เลือกบริษัทได้อิสระ
-   *   (มูลค่ารายแผนกคือของที่บริษัทหวง ส่วน "ของชิ้นนี้เป็นของบริษัทไหน" ไม่ใช่)
-   *   จึงไม่มี companyLocked คู่กับ locked
+   * ★ เป็นแกนของสิทธิ์เหมือน departmentId แล้ว (เดิมเปิดให้ทุก role เลือกบริษัทไหนก็ได้)
+   *   role ที่ไม่อยู่ใน DASHBOARD_ALL_COMPANY_ROLES จะถูกบังคับเป็นบริษัทตัวเอง และ
+   *   companyCode ที่ส่งมาถูกทิ้ง — หน้าจอต้องอ่านค่านี้ ห้ามเดาจากค่าที่ตัวเองส่งไป
    */
   companyCode: string | null;
   companyName: string | null;
+  /**
+   * true = หน้าจอต้องล็อกช่องเลือกบริษัท (เลือกบริษัทอื่นไปก็ไม่มีผล backend ทิ้งอยู่ดี)
+   *
+   * แยกจาก `locked` ของแผนกโดยตั้งใจ — สองแกนล็อกไม่พร้อมกัน MANAGER ถูกปลดล็อกทั้งคู่
+   * ส่วน EMPLOYEE ถูกล็อกทั้งคู่ก็จริง แต่วันที่สอง role list ต่างกันจะมีเคสล็อกข้างเดียว
+   */
+  companyLocked: boolean;
 }
 
 export interface DashboardTotals {
@@ -76,7 +83,7 @@ export interface StatusCount {
 
 export interface DashboardStatus {
   active: number;
-  /** ทุกสถานะที่ไม่ใช่ Active รวมกัน (Inactive / Under Maintenance / Lost / Disposed) */
+  /** ทุกสถานะที่ไม่ใช่ Active — วันนี้มีค่าเดียวคือ Inactive (SAP เป็นเจ้าของแกนนี้) */
   inactive: number;
   /** null = ไม่มีชิ้นให้คิดเปอร์เซ็นต์ — 0 แปลว่า "ไม่มี Active สักชิ้น" ซึ่งคนละเรื่อง */
   activePercent: number | null;
@@ -96,6 +103,14 @@ export interface DepartmentSummary {
   /** null = แถวรวมของชิ้นที่ยังไม่ได้ระบุแผนก (asset.departmentId เป็น NULL) ไม่ใช่แผนกจริง */
   departmentId: number | null;
   departmentName: string | null;
+  /**
+   * บริษัทเจ้าของแผนก (0025) — null เฉพาะแถว "ยังไม่ระบุแผนก" ที่ไม่ใช่แผนกจริง
+   *
+   * ★ หน้าจอต้องแสดงค่านี้กำกับเมื่อดู "ทุกบริษัท" — ชื่อแผนกซ้ำข้ามบริษัทจริง 55 ชื่อ
+   *   (บางชื่อโผล่ 3 ครั้ง) ถ้าโชว์แต่ชื่อ ผู้ใช้จะเห็นตัวเลือกหน้าตาเหมือนกันแล้วเลือกมั่ว
+   *   เลือกบริษัทแล้วไม่ต้องแสดงก็ได้ เพราะลิสต์ถูกกรองเหลือบริษัทเดียวอยู่แล้ว
+   */
+  companyCode: string | null;
   /** 0 ได้ = แผนกนี้ยังไม่มีสินทรัพย์ในทะเบียนสักชิ้น (ไม่ใช่ข้อมูลหาย) */
   assets: number;
   active: number;

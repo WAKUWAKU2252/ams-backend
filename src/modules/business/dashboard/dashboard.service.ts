@@ -20,7 +20,7 @@ import { db } from '@intrastucture/db';
 import { asset, assetAccounting, company, department, employee, user } from '@intrastucture/db/schema';
 import { NotFoundError } from '@common/errors';
 import { requireRow } from '@common/db-result';
-import { DASHBOARD_ALL_DEPARTMENT_ROLE_LIST } from '@common/roles';
+import { DASHBOARD_ALL_COMPANY_ROLE_LIST, DASHBOARD_ALL_DEPARTMENT_ROLE_LIST } from '@common/roles';
 import type {
   AssetStatus,
   CompanySummary,
@@ -32,8 +32,14 @@ import type {
   StatusCount,
 } from './dashboard.types';
 
-/** ลำดับที่อยากให้สถานะเรียงบนหน้าจอ — ตรงกับลำดับใน enumAssetStatus */
-const STATUS_ORDER: AssetStatus[] = ['Active', 'Inactive', 'Under Maintenance', 'Lost', 'Disposed'];
+/**
+ * ลำดับที่อยากให้สถานะเรียงบนหน้าจอ
+ *
+ * ★ สองค่าเท่านั้น — SAP เป็นเจ้าของแกนนี้ (ดู sapStatusRule ที่ asset.connector)
+ *   enum ใน DB ยังมีอีกสามค่าค้างอยู่เพราะ postgres ลบค่าใน enum ไม่ได้ แต่ไม่มีทางเดิน
+ *   ไหนเขียนถึงแล้ว ห้ามเติมกลับเข้ามาที่นี่
+ */
+const STATUS_ORDER: AssetStatus[] = ['Active', 'Inactive'];
 
 /**
  * ชิ้นที่นับเป็น "สินทรัพย์ถาวร" ของหน้านี้ = อยู่ในทะเบียนแล้วเท่านั้น
@@ -95,23 +101,49 @@ const COUNT_ASSETS = sql<number>`count(${asset.id})::int`;
 const COUNT_ACTIVE = sql<number>`count(${asset.id}) filter (where ${asset.status} = 'Active')::int`;
 
 /**
- * แปลง companyCode ที่ส่งมาเป็นบริษัทจริง — แยกจาก resolveScope โดยตั้งใจ
+ * บริษัทของผู้ใช้ = สังกัดตาม HR ก่อน ถ้าไม่มีค่อยถอยไปใช้บริษัทของแผนกที่เขาผูกอยู่
  *
- * ★ บริษัทไม่ใช่แกนของสิทธิ์ ต่างจากแผนก จึงไม่ผ่าน role เลย ใครเลือกบริษัทไหนก็ได้
- *   (ดูเหตุผลเต็มที่ DashboardScope.companyCode)
+ * ★ ต้องเป็น employee.companyCode มาก่อนเสมอ ห้ามสลับลำดับ — employee.departmentId
+ *   ชี้ไปแผนกของ UBA เกือบทั้งหมด (วัด 2026-09-03: UBA 391 · MIG 10 · UBP 3 จาก 404 คน)
+ *   ซึ่งเป็นบั๊กเดิมที่ตาราง employee_company ถูกสร้างมาแก้ ถ้าเอาแผนกขึ้นก่อน คน UBP/UBA
+ *   จะถูกล็อกเป็น UBA แทบทุกคน แล้วเห็นตัวเลขของบริษัทที่ตัวเองไม่ได้สังกัด
  *
- * รหัสที่ไม่มีในตารางต้องเป็น 404 ไม่ใช่เงียบ ๆ แล้วคืนศูนย์ — คืนศูนย์จะอ่านเหมือน
- * "บริษัทนี้ไม่มีสินทรัพย์" ซึ่งคนละเรื่องกับ "พิมพ์รหัสผิด" คนละทางแก้
+ * ⚠️ ตัวถอยหลังนี้จึงเป็นของชั่วคราวที่ยังพาไป UBA ได้อยู่ — employee.companyCode ยังว่าง
+ *    199 จาก 404 แถว (ฝั่งที่มี user จริงว่าง 21 คน) วิธีแก้ที่ถูกคือไปเติมคอลัมน์นั้น
+ *    ไม่ใช่มาแก้ลำดับตรงนี้
+ *
+ * ★ ไม่ใช้ employee_company ตัดสิน — ตารางนั้นตอบว่า "มีตัวตนใน OHEM ฐานไหนบ้าง"
+ *   ซึ่ง 237 จาก 304 คนมีสองบริษัท (4 คนมีสาม) จึงไม่มีคำตอบเดียวให้เอามาเป็นแกนสิทธิ์
  */
-async function resolveCompany(
-  requested: string | undefined,
-): Promise<{ code: string; name: string } | null> {
-  if (requested === undefined) return null;
-  // ไม่กรอง isActive — บริษัทที่เลิกใช้แล้วยังมีสินทรัพย์ค้างอยู่ได้ และบัญชียังต้องดูได้
-  // (กติกาเดียวกับแผนกที่ยุบไปแล้วใน resolveScope)
-  const row = await db.query.company.findFirst({ where: eq(company.code, requested) });
-  if (!row) throw new NotFoundError(`บริษัทรหัส ${requested}`);
-  return { code: row.code, name: row.name };
+const OWN_COMPANY_CODE = sql<string>`coalesce(${employee.companyCode}, ${department.companyCode})`;
+
+/** ตัวตนฝั่งองค์กรของผู้ใช้ — อ่านครั้งเดียวแล้วใช้ทั้งแกนแผนกและแกนบริษัท */
+type OwnIdentity = {
+  departmentId: number;
+  departmentName: string;
+  companyCode: string;
+  companyName: string | null;
+};
+
+/** null = user ยังไม่ผูก employee (employee ที่ชี้ไปแผนกที่ไม่มีจริงถูก FK กันไว้แล้ว) */
+async function findOwnIdentity(userId: number): Promise<OwnIdentity | null> {
+  const rows = await db
+    .select({
+      departmentId: department.id,
+      departmentName: department.name,
+      companyCode: OWN_COMPANY_CODE,
+      companyName: company.name,
+    })
+    .from(user)
+    .innerJoin(employee, eq(employee.id, user.employeeId))
+    .innerJoin(department, eq(department.id, employee.departmentId))
+    // leftJoin ไม่ใช่ inner — ทั้งสองคอลัมน์ที่ป้อน coalesce มี FK ไป company อยู่แล้ว
+    // แถวจึงต้องเจอเสมอ แต่ inner join จะทำให้ "หาชื่อบริษัทไม่เจอ" กลายเป็น "ผู้ใช้คนนี้
+    // ไม่มีตัวตน" แล้วเด้งไป UNLINKED ทั้งที่คนละเรื่องกัน
+    .leftJoin(company, eq(company.code, OWN_COMPANY_CODE))
+    .where(eq(user.id, userId));
+
+  return rows[0] ?? null;
 }
 
 /**
@@ -122,11 +154,12 @@ async function resolveCompany(
  *   ทั้งที่สิ่งที่ผู้ใช้ควรได้คือ "ข้อมูลของแผนกตัวเอง" ซึ่งเขามีสิทธิ์ดูอยู่แล้ว
  *   และผลลัพธ์บอกกลับไปเสมอว่าตัวเลขที่ได้เป็นของแผนกไหน (scope.departmentName)
  */
-type DepartmentScope = Omit<DashboardScope, 'companyCode' | 'companyName'>;
+type DepartmentScope = Omit<DashboardScope, 'companyCode' | 'companyName' | 'companyLocked'>;
 
-async function resolveScope(
+async function resolveDepartmentScope(
   currentUser: { id: number; role: string },
   requested: number | undefined,
+  own: OwnIdentity | null,
 ): Promise<DepartmentScope> {
   if (DASHBOARD_ALL_DEPARTMENT_ROLE_LIST.includes(currentUser.role)) {
     if (requested === undefined) {
@@ -138,15 +171,6 @@ async function resolveScope(
     return { kind: 'ALL', departmentId: dep.id, departmentName: dep.name, locked: false };
   }
 
-  const rows = await db
-    .select({ departmentId: department.id, departmentName: department.name })
-    .from(user)
-    .innerJoin(employee, eq(employee.id, user.employeeId))
-    .innerJoin(department, eq(department.id, employee.departmentId))
-    .where(eq(user.id, currentUser.id));
-
-  const own = rows[0];
-  // ไม่มีแถว = user ยังไม่ผูก employee (employee ที่ชี้ไปแผนกที่ไม่มีจริงถูก FK กันไว้แล้ว)
   if (!own) return { kind: 'UNLINKED', departmentId: null, departmentName: null, locked: true };
 
   return {
@@ -155,6 +179,38 @@ async function resolveScope(
     departmentName: own.departmentName,
     locked: true,
   };
+}
+
+/**
+ * บริษัทที่ตัวเลขชุดนี้จะนับมา — แกนสิทธิ์ที่สองของหน้านี้ คู่ขนานกับแกนแผนก
+ *
+ * ★ role ที่ไม่อยู่ใน DASHBOARD_ALL_COMPANY_ROLES ถูก **บังคับ** เป็นบริษัทตัวเอง และ
+ *   `requested` ถูกทิ้งทั้งดุ้น ไม่ใช่โยน 403 — เหตุผลเดียวกับแกนแผนก: สิ่งที่ผู้ใช้ควรได้
+ *   คือข้อมูลของบริษัทตัวเอง ซึ่งเขามีสิทธิ์ดูอยู่แล้ว ไม่ใช่หน้าจอที่พังทั้งหน้า
+ *   (จึงไม่ 404 ตอนรหัสไม่มีจริงด้วย — คนกลุ่มนี้ส่งอะไรมาก็ไม่มีผลอยู่แล้ว)
+ *
+ * รหัสที่ไม่มีในตารางต้องเป็น 404 **เฉพาะฝั่งที่เลือกได้จริง** ไม่ใช่เงียบ ๆ แล้วคืนศูนย์ —
+ * คืนศูนย์จะอ่านเหมือน "บริษัทนี้ไม่มีสินทรัพย์" ซึ่งคนละเรื่องกับ "พิมพ์รหัสผิด"
+ */
+async function resolveCompanyScope(
+  currentUser: { id: number; role: string },
+  requested: string | undefined,
+  own: OwnIdentity | null,
+): Promise<{ code: string | null; name: string | null; locked: boolean }> {
+  if (DASHBOARD_ALL_COMPANY_ROLE_LIST.includes(currentUser.role)) {
+    if (requested === undefined) return { code: null, name: null, locked: false };
+    // ไม่กรอง isActive — บริษัทที่เลิกใช้แล้วยังมีสินทรัพย์ค้างอยู่ได้ และบัญชียังต้องดูได้
+    // (กติกาเดียวกับแผนกที่ยุบไปแล้วใน resolveDepartmentScope)
+    const row = await db.query.company.findFirst({ where: eq(company.code, requested) });
+    if (!row) throw new NotFoundError(`บริษัทรหัส ${requested}`);
+    return { code: row.code, name: row.name, locked: false };
+  }
+
+  // ยังไม่ผูก employee = บอกบริษัทไม่ได้เหมือนที่บอกแผนกไม่ได้ — overview จะคืน
+  // emptyOverview จาก kind UNLINKED อยู่แล้ว ไม่ต้องเดาบริษัทให้
+  if (!own) return { code: null, name: null, locked: true };
+
+  return { code: own.companyCode, name: own.companyName, locked: true };
 }
 
 /** ผลลัพธ์ของคนที่ระบบยังบอกไม่ได้ว่าอยู่แผนกไหน — ศูนย์ทุกช่อง แต่ยอดเงินเป็น null */
@@ -187,13 +243,23 @@ export async function overview(
   // ไม่งั้นชิ้นเดียวกันจะขึ้นป้าย "ข้อมูลปีนี้" ที่หน้าหนึ่งและ "ปีเก่า" ที่อีกหน้า
   const fiscalYear = new Date().getFullYear();
 
+  // ตัวตนฝั่งองค์กรใช้ร่วมกันทั้งสองแกน — อ่านทีเดียวแล้วส่งต่อ ไม่ใช่ query ซ้ำสองรอบ
+  //
+  // ข้ามไปเลยเมื่อ role นั้นไม่ถูกล็อกทั้งสองแกน (ค่าไม่ถูกใช้) — คงจำนวนคิวรีของ
+  // MANAGER/FINANCE/ADMIN ไว้เท่าเดิม และเงื่อนไขนี้จะปรับตามเองถ้าวันหลังสอง role list ต่างกัน
+  const needsOwn =
+    !DASHBOARD_ALL_DEPARTMENT_ROLE_LIST.includes(currentUser.role) ||
+    !DASHBOARD_ALL_COMPANY_ROLE_LIST.includes(currentUser.role);
+  const own = needsOwn ? await findOwnIdentity(currentUser.id) : null;
+
   // ตรวจรหัสบริษัทก่อนทุกอย่าง — รหัสผิดต้อง 404 ไม่ใช่ไปโผล่เป็นตัวเลขศูนย์ทั้งหน้า
-  const companyRow = await resolveCompany(input.companyCode);
-  const departmentScope = await resolveScope(currentUser, input.departmentId);
+  const companyScope = await resolveCompanyScope(currentUser, input.companyCode, own);
+  const departmentScope = await resolveDepartmentScope(currentUser, input.departmentId, own);
   const scope: DashboardScope = {
     ...departmentScope,
-    companyCode: companyRow?.code ?? null,
-    companyName: companyRow?.name ?? null,
+    companyCode: companyScope.code,
+    companyName: companyScope.name,
+    companyLocked: companyScope.locked,
   };
   if (scope.kind === 'UNLINKED') return emptyOverview(scope, fiscalYear);
 
@@ -223,9 +289,28 @@ export async function overview(
     .groupBy(asset.status);
 
   const byStatus = new Map<AssetStatus, number>(statusRows.map((r) => [r.status, r.count]));
-  const breakdown: StatusCount[] = STATUS_ORDER.filter((s) => (byStatus.get(s) ?? 0) > 0).map(
-    (s) => ({ status: s, count: byStatus.get(s) ?? 0 }),
-  );
+
+  /**
+   * breakdown สร้างจาก "แถวที่มีอยู่จริง" แล้วค่อยเรียงตาม STATUS_ORDER
+   *
+   * ★ ห้ามใช้ STATUS_ORDER เป็น whitelist กรอง (ของเดิมทำแบบนั้น)
+   *
+   * enum asset_status ใน DB ยังมีค่าที่ถอดออกจากทางเดินแล้วค้างอยู่สามตัว — postgres
+   * ลบค่าใน enum ไม่ได้ ถ้ามีแถวไหนถือค่านั้น (สคริปต์/แก้ SQL มือ) การกรองด้วย
+   * STATUS_ORDER จะทำให้มันหายจาก breakdown เงียบ ๆ ทั้งที่ยังถูกนับใน inactive
+   * (inactive = totals.assets - active ซึ่งนับทุกอย่างที่ไม่ใช่ Active) — ผลคือ
+   * ผลรวมของ breakdown ไม่เท่ากับ totals แล้วอ่านเป็นบั๊กทันที และเถียงไม่ได้
+   *
+   * เรียงโดยเอาลำดับใน STATUS_ORDER ก่อน ค่าที่ไม่รู้จักไปต่อท้าย — เห็นทันทีว่ามีของแปลก
+   */
+  const rank = (s: AssetStatus) => {
+    const i = STATUS_ORDER.indexOf(s);
+    return i === -1 ? STATUS_ORDER.length : i;
+  };
+  const breakdown: StatusCount[] = [...byStatus.entries()]
+    .filter(([, count]) => count > 0)
+    .map(([status, count]) => ({ status, count }))
+    .sort((a, b) => rank(a.status) - rank(b.status) || a.status.localeCompare(b.status));
 
   const active = byStatus.get('Active') ?? 0;
   const inactive = totals.assets - active;
@@ -233,9 +318,11 @@ export async function overview(
   // ยิงคู่กันไปเลย ไม่ได้ใช้ผลของกันและกัน
   const [byDepartment, byCompany, remainingLife] = await Promise.all([
     summarizeByDepartment(scope.departmentId, scope.companyCode),
-    // ★ ไม่ส่ง scope.companyCode เข้าไปโดยตั้งใจ — ลิสต์นี้เป็นตัวเลือกใน dropdown ด้วย
-    //   กรองตามที่เลือกเมื่อไหร่ ผู้ใช้จะกดกลับไปบริษัทอื่นไม่ได้อีก (ดู CompanySummary)
-    summarizeByCompany(scope.departmentId),
+    // ★ ส่ง companyCode เข้าไปเฉพาะตอน "ถูกล็อก" ไม่ใช่ตอน "เลือกอยู่" — สองอย่างนี้ต่างกัน
+    //   ลิสต์นี้เป็นตัวเลือกใน dropdown ด้วย กรองตามที่ *เลือก* เมื่อไหร่ ผู้ใช้จะกดกลับไป
+    //   บริษัทอื่นไม่ได้อีก (ดู CompanySummary) แต่ตอน *ถูกล็อก* ไม่มีตัวเลือกอื่นให้กดอยู่แล้ว
+    //   และการส่งรายชื่อบริษัทอื่นพร้อมยอดเงินไปให้คนที่ดูไม่ได้ คือรั่วผ่านประตูหลัง
+    summarizeByCompany(scope.departmentId, scope.companyLocked ? scope.companyCode : null),
     summarizeRemainingLife(scope.departmentId, scope.companyCode),
   ]);
 
@@ -290,6 +377,9 @@ async function summarizeByDepartment(
     .select({
       departmentId: department.id,
       departmentName: department.name,
+      // บริษัทเจ้าของแผนก (0025) — ชื่อแผนกซ้ำข้ามบริษัทจริง 55 ชื่อ บางชื่อโผล่ 3 ครั้ง
+      // หน้าจอต้องมีตัวแยกให้คนอ่าน ไม่งั้น dropdown จะมีตัวเลือกหน้าตาเหมือนกันเป๊ะ
+      companyCode: department.companyCode,
       assets: COUNT_ASSETS,
       active: COUNT_ACTIVE,
       bookedCost: SUM_COST,
@@ -309,15 +399,35 @@ async function summarizeByDepartment(
     .leftJoin(assetAccounting, eq(assetAccounting.assetId, asset.id))
     .where(
       departmentId === null
-        ? // แผนกที่ปิดใช้งานแล้ว "แต่ยังมีของค้างอยู่" ต้องโผล่ด้วย ไม่งั้นของก้อนนั้นหายจาก
-          // ตารางทั้งที่ยังถูกนับใน totals แล้วยอดรวมรายแผนกจะไม่เท่ากับ Total fixed asset
-          // — ส่วนต่างที่อธิบายไม่ได้บนหน้า dashboard คือสิ่งที่ทำให้คนเลิกเชื่อทั้งหน้า
-          or(eq(department.isActive, true), isNotNull(asset.id))
+        ? and(
+            // ★ ต้องกรองบริษัทที่ "ตัวแถวแผนก" ด้วย ไม่ใช่แค่ใน ON ของ join (0025)
+            //
+            // เงื่อนไขใน ON คุมแค่ว่า "นับ asset ของบริษัทไหน" แต่แถวแผนกยังหลุดมาครบทุก
+            // บริษัทเพราะ isActive = true — เดิมไม่มีใครเห็นปัญหาเพราะมีบริษัทเดียว
+            // พอมี 3 บริษัทตารางนี้พุ่งจาก 61 เป็น 151 แถว โดย 120 แถวเป็น 0 ชิ้น
+            // และ 55 ชื่อซ้ำกันข้ามบริษัทจนแยกไม่ออกว่าอันไหนของใคร
+            //
+            // ★★ กรองตรง ๆ ได้เพราะ fk_asset_department เป็นคีย์คู่แล้วตั้งแต่ 0026 —
+            //    asset ชี้แผนกของบริษัทอื่นไม่ได้อีก DB ปฏิเสธตั้งแต่ insert
+            //    ถ้าวันหลังมีใครถอด FK ตัวนั้นออก ตรงนี้จะกลืนของบริษัทที่ผูกข้ามไปเงียบ ๆ
+            //    แล้ว sum(byDepartment) จะน้อยกว่า totals โดยไม่มีอะไรอธิบายบนหน้าจอ
+            //    (เคยเขียน OR เผื่อไว้รอบหนึ่งตอนยังไม่มี FK — เอาออกเพราะกลายเป็นสาขาที่
+            //     ไม่มีทางเข้าถึงแล้ว และการเก็บโค้ดที่รันไม่ได้ไว้ทำให้คนอ่านเข้าใจผิดว่า
+            //     สถานการณ์นั้นยังเกิดได้)
+            //
+            // เลือกบริษัทแล้ว = เห็นเฉพาะแผนกของบริษัทนั้น
+            // ไม่เลือก = เห็นทั้งเครือ (หน้าจอต้องแสดง companyCode กำกับ ไม่งั้นแยกไม่ออก)
+            companyCode === null ? undefined : eq(department.companyCode, companyCode),
+            // แผนกที่ปิดใช้งานแล้ว "แต่ยังมีของค้างอยู่" ต้องโผล่ด้วย ไม่งั้นของก้อนนั้นหายจาก
+            // ตารางทั้งที่ยังถูกนับใน totals แล้วยอดรวมรายแผนกจะไม่เท่ากับ Total fixed asset
+            // — ส่วนต่างที่อธิบายไม่ได้บนหน้า dashboard คือสิ่งที่ทำให้คนเลิกเชื่อทั้งหน้า
+            or(eq(department.isActive, true), isNotNull(asset.id)),
+          )
         : // กรองแผนกเดียว: เอาแผนกนั้นเสมอแม้ปิดใช้งานหรือไม่มีของ — ผลลัพธ์ต้องเป็น
           // "แถวที่บอกว่า 0 ชิ้น" ไม่ใช่ตารางว่างที่อ่านเหมือนโหลดไม่สำเร็จ
           eq(department.id, departmentId),
     )
-    .groupBy(department.id, department.name)
+    .groupBy(department.id, department.name, department.companyCode)
     // มากไปน้อยตามจำนวนชิ้น แล้วค่อยเรียงชื่อ — แผนก 0 ชิ้นจึงไปกองท้ายตารางเอง
     .orderBy(sql`count(${asset.id}) desc`, asc(department.name));
 
@@ -347,7 +457,9 @@ async function summarizeByDepartment(
     const orphan = requireRow(orphanRows, 'dashboard orphan department');
     // ไม่มีของกลุ่มนี้ = ไม่ต้องมีแถว (แถว 0 ที่ไม่ใช่แผนกจริงมีแต่ทำให้สับสน)
     if (orphan.assets > 0) {
-      summaries.push({ departmentId: null, departmentName: null, ...orphan });
+      // companyCode เป็น null เพราะแถวนี้ไม่ใช่แผนกจริง — มันคือถังรวมของชิ้นที่ยังไม่ระบุ
+      // แผนก ซึ่งอาจมาจากหลายบริษัทพร้อมกันตอนดู "ทุกบริษัท" จะใส่รหัสบริษัทเดียวไม่ได้
+      summaries.push({ departmentId: null, departmentName: null, companyCode: null, ...orphan });
     }
   }
 
@@ -359,15 +471,23 @@ async function summarizeByDepartment(
  * บริษัทที่ยังไม่มีของสักชิ้นต้องมีแถวออกมาเป็น 0 ไม่ใช่หายไปเฉย ๆ
  * ไม่งั้นมันจะไม่โผล่ใน dropdown แล้วผู้ใช้จะเลือกดูไม่ได้เลยว่ามีอะไรอยู่บ้าง
  *
- * ★ ไม่รับ companyCode — ก้อนนี้เป็นตัวเลือกใน dropdown ด้วย (ดู CompanySummary)
+ * ★ lockedCompanyCode ไม่ใช่ "บริษัทที่เลือกอยู่" — ห้ามส่งค่าที่ผู้ใช้เลือกเข้ามา
+ *   ก้อนนี้เป็นตัวเลือกใน dropdown ด้วย (ดู CompanySummary) กรองตามที่เลือกเมื่อไหร่
+ *   ผู้ใช้จะกดกลับไปบริษัทอื่นไม่ได้อีก ที่ส่งเข้ามาได้มีอย่างเดียวคือบริษัทที่ role นั้น
+ *   **ถูกล็อกไว้** ซึ่งแปลว่าไม่มีตัวเลือกอื่นให้กดตั้งแต่แรก และรายชื่อบริษัทอื่นพร้อม
+ *   ยอดเงินก็ไม่ควรหลุดไปถึงเขาด้วย (null = ไม่ล็อก = เห็นครบทุกบริษัทเหมือนเดิม)
  *
  * ★ เงื่อนไขแผนกต้องอยู่ใน ON ของ LEFT JOIN เท่านั้น ห้ามย้ายไป WHERE
  *   ย้ายเมื่อไหร่ LEFT JOIN กลายเป็น INNER JOIN โดยปริยาย แล้วบริษัท 0 ชิ้นหายเงียบ ๆ
+ *   (ตัวกรองบริษัทข้างล่างอยู่ใน WHERE ได้ เพราะมันกรอง "ตัวแถวบริษัท" ไม่ใช่ฝั่ง asset)
  *
  * ไม่มีแถว "ยังไม่ระบุบริษัท" คู่กับของแผนก — asset.companyCode เป็น NOT NULL
  * และมี FK ไป company.code จึงไม่มีทางมีชิ้นที่ไม่มีบริษัท (ต่างจาก departmentId ที่ nullable)
  */
-async function summarizeByCompany(departmentId: number | null): Promise<CompanySummary[]> {
+async function summarizeByCompany(
+  departmentId: number | null,
+  lockedCompanyCode: string | null,
+): Promise<CompanySummary[]> {
   const rows = await db
     .select({
       companyCode: company.code,
@@ -389,10 +509,21 @@ async function summarizeByCompany(departmentId: number | null): Promise<CompanyS
     )
     .leftJoin(assetAccounting, eq(assetAccounting.assetId, asset.id))
     .where(
-      // ในเครือมี 7 บริษัท แต่ 5 บริษัทไม่มี SAP ให้ sync จึงไม่มีทางมีสินทรัพย์เข้ามา
-      // ถ้าโชว์หมดจะได้ dropdown ที่มีตัวเลือกตายอยู่ 5 อัน — เอาเฉพาะที่ "มีทางจะมีของ"
+      // บริษัทที่ไม่มี SAP ให้ sync ไม่มีทางมีสินทรัพย์เข้ามา (ทั้งสองทางเข้าของ asset
+      // ต้องผ่าน SAP: PO_FLOW มาจาก PO ที่ sync มา / SAP_LEGACY มาจาก connector)
+      // โชว์หมดจะได้ dropdown ที่มีตัวเลือกตาย — เอาเฉพาะที่ "มีทางจะมีของ"
       // (เปิดใช้งาน + ต่อ SAP) หรือ "มีของค้างอยู่จริง" แม้จะปิดใช้งานไปแล้ว
-      or(and(eq(company.isActive, true), isNotNull(company.sapDbName)), isNotNull(asset.id)),
+      //
+      // ★ ตัวกรองนี้ยังจำเป็นแม้ตาราง company จะเหลือแต่บริษัทที่ต่อ SAP แล้ว (0024) —
+      //   มันคือตัวที่ทำให้ MIG ซึ่งตั้ง isActive = false รอ import พนักงานอยู่ ไม่โผล่
+      //   ให้คนเลือกก่อนเวลา และจะโผล่เองทันทีที่เปิด isActive โดยไม่ต้องมาแก้ตรงนี้
+      and(
+        or(and(eq(company.isActive, true), isNotNull(company.sapDbName)), isNotNull(asset.id)),
+        // ถูกล็อก = เหลือแถวเดียวเสมอ แม้บริษัทนั้นจะปิดใช้งานหรือยังไม่มีของสักชิ้น
+        // (ต้องมีแถวออกไป ไม่งั้น dropdown ฝั่งหน้าจอจะว่างทั้งที่ v-model มีค่าอยู่ —
+        //  ปัญหาเดียวกับช่องแผนกของพนักงานทั่วไป ดู MainDashboard.vue)
+        lockedCompanyCode === null ? undefined : eq(company.code, lockedCompanyCode),
+      ),
     )
     .groupBy(company.code, company.name)
     // มากไปน้อยตามจำนวนชิ้น แล้วค่อยเรียงรหัส — บริษัท 0 ชิ้นไปกองท้ายเอง

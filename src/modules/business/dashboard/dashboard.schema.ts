@@ -3,7 +3,8 @@ import { t } from 'elysia';
 
 /**
  * departmentId เป็นแค่ "คำขอ" ไม่ใช่คำสั่ง — role ที่ไม่มีสิทธิ์ดูข้ามแผนกจะถูกทิ้งค่านี้
- * แล้วบังคับเป็นแผนกตัวเองใน resolveScope (ดู dashboard.service.ts)
+ * แล้วบังคับเป็นแผนกตัวเองใน resolveDepartmentScope (ดู dashboard.service.ts)
+ * companyCode ก็เหมือนกัน — role ที่ไม่อยู่ใน DASHBOARD_ALL_COMPANY_ROLES ถูกบังคับเป็นบริษัทตัวเอง
  *
  * ไม่มี fiscalYear ให้เลือก: ตาราง asset_accounting เก็บ 1 แถวต่อชิ้น = ปีล่าสุดที่ SAP มี
  * ให้ชิ้นนั้นเท่านั้น ไม่มีข้อมูลย้อนหลังให้เลือกดู (แผนเก็บรายปีอยู่ในเฟสถัดไป)
