@@ -22,7 +22,11 @@ const EnvSchema = t.Object({
   UPLOAD_DIR: t.String({ default: './uploads' }),
   // กวาดไฟล์กำพร้าทุกกี่นาที (60 = ทุกชั่วโมง) — 0 = ปิด
   // กำพร้า = อัปแล้วแต่ไม่มี asset/grpo ชี้ถึง และเก่ากว่า 24 ชม. (เกณฑ์อยู่ใน service)
-  UPLOAD_CLEANUP_INTERVAL_MINUTES: t.Number({ default: 60, minimum: 0 }),
+  //
+  // ★ เพดาน 1440 ด้วยเหตุผลเดียวกับ SAP_SYNC_INTERVAL_MINUTES (ดูคำอธิบาย overflow ที่นั่น)
+  //   ตัวนี้อันตรายกว่าเพราะไม่มี cooldown/lock อะไรเลย — overflow เมื่อไหร่คือยิงคิวรี
+  //   แล้ววน unlink ไฟล์รัวทุก 1 ms
+  UPLOAD_CLEANUP_INTERVAL_MINUTES: t.Number({ default: 60, minimum: 0, maximum: 1440 }),
   JWT_SECRET: t.String({ minLength: 16 }),
   JWT_EXPIRES_IN: t.String({ default: '8h' }),
 
@@ -41,6 +45,20 @@ const EnvSchema = t.Object({
   // ชื่อ POWER_AUTOMATE_URL ตัวบนไม่เปลี่ยนเป็น ..._MANAGER_URL โดยตั้งใจ — เครื่อง
   // production มี .env ของตัวเอง เปลี่ยนชื่อ = ค่าเดิมไม่ถูกอ่านแล้วการ์ดขออนุมัติเงียบไปทั้งระบบ
   POWER_AUTOMATE_REQUESTER_URL: t.String({ default: '' }),
+
+  // ── ความลับร่วมของ webhook ที่ Power Automate ยิงผลอนุมัติกลับมา (POST /teams/webhook)
+  //
+  // เส้นนั้นเป็นเส้นเดียวในระบบที่ "เปลี่ยนสถานะใบคำขอ" ได้โดยไม่มี JWT — เพราะ Power
+  // Automate ไม่มี token ของเรา ตัวยืนยันตัวตนจึงเหลือแค่ค่านี้ ซึ่งเทียบกับ header
+  // X-Teams-Webhook-Secret ที่ flow แนบมา
+  //
+  // ★ default '' = **ปิดเส้นนั้นทิ้ง** ไม่ใช่ปล่อยผ่าน (ต่างจาก POWER_AUTOMATE_URL ที่ว่าง
+  //   แล้วแค่ส่งไม่ได้) ของแบบนี้ต้อง fail closed: ลืมตั้งบน production แล้วปล่อยผ่าน
+  //   = ใครก็ได้ยิง curl มาอนุมัติใบแทนหัวหน้า ซึ่งแย่กว่าการที่ flow พังแล้วรู้ตัวทันที
+  //
+  // ★ ห้าม log ห้าม commit — เทียบเท่ารหัสผ่าน สร้างด้วย `openssl rand -hex 32`
+  //   หรือ `bun -e "console.log(crypto.randomUUID()+crypto.randomUUID())"`
+  TEAMS_WEBHOOK_SECRET: t.String({ default: '' }),
 
   // ── SAP B1 (MS SQL Server) — คนละเครื่องกับ ams_db, pool แยกกันคนละตัว
   // login ต้องเป็น read-only ที่ระดับสิทธิ์ DB ไม่ใช่แค่มารยาทในโค้ด:
@@ -73,7 +91,14 @@ const EnvSchema = t.Object({
   // เพดาน 366: ตั้งกว้างกว่านี้ = ดึงทีเดียวเป็นปี ซึ่งคือสิ่งที่ backfill แบบทยอยตั้งใจเลี่ยง
   SAP_BACKFILL_WINDOW_DAYS: t.Number({ default: 30, minimum: 1, maximum: 366 }),
   // scheduler ยิงทุกกี่นาที (120 = ทุก 2 ชม.) — 0 = ปิด scheduler (ใช้ปุ่มอย่างเดียว)
-  SAP_SYNC_INTERVAL_MINUTES: t.Number({ default: 120, minimum: 0 }),
+  //
+  // ★ เพดาน 1440 (หนึ่งวัน) ไม่ใช่เรื่องมารยาท แต่กัน setInterval overflow:
+  //   ค่าที่เกิน 2^31-1 ms (= 35,791 นาที / ~24.8 วัน) Bun จะ warn แล้ว **clamp เหลือ 1 ms**
+  //   ไม่ใช่โยน error — job จึงกลายเป็น tight loop เงียบ ๆ แทนที่จะ "นาน ๆ ทีตามที่ตั้ง"
+  //   (ยืนยันบน Bun 1.3.14: TimeoutOverflowWarning แล้วยิงรัวทันที)
+  //   ฝั่ง SAP ยังมี cooldown + advisory lock ช่วยดูดซับ แต่ยังกิน connection ของ ams_db
+  //   ทุก tick อยู่ดี — ตั้งเพดานให้ config ที่พิมพ์ผิดตกที่ประตูนี้เลย ดีกว่าไปพังตอนรัน
+  SAP_SYNC_INTERVAL_MINUTES: t.Number({ default: 120, minimum: 0, maximum: 1440 }),
   // เว้นกี่วินาทีหลังรอบก่อนจบ ถึงจะเริ่มรอบใหม่ได้ — 0 = ปิด
   // advisory lock กันได้แค่ "รันซ้อนกัน" ไม่ได้กัน "กดถี่": รอบที่จบไปเมื่อ 2 วินาทีที่แล้ว
   // แทบไม่มีทางมีของใหม่ให้ดึง กดซ้ำจึงเป็นการรีด ERP ของบริษัทเปล่า ๆ

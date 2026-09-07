@@ -14,6 +14,7 @@
     "db:import:employee": "bun run src/intrastucture/db/import/employee.ts",
     "db:import:employee-ubp": "bun run src/intrastucture/db/import/employee-ubp.ts",
     "db:import:location": "bun run src/intrastucture/db/import/location.ts",
+    "db:import:sub-location": "bun run src/intrastucture/db/import/sub-location.ts",
     "db:import:role": "bun run src/intrastucture/db/import/role.ts",
     "db:import:user": "bun run src/intrastucture/db/import/user.ts",
     "db:studio": "drizzle-kit studio"
@@ -23,6 +24,7 @@
     "@types/bun": "latest",
     "@types/mssql": "^12.3.0",
     "@types/pg": "^8.20.4",
+    "@types/qrcode": "^1.5.6",
     "daisyui": "^5.7.16",
     "drizzle-kit": "^0.31.10"
   },
@@ -36,6 +38,7 @@
     "drizzle-orm": "^0.45.2",
     "elysia": "^1.4.29",
     "mssql": "^12.7.0",
-    "pg": "^8.22.0"
+    "pg": "^8.22.0",
+    "qrcode": "^1.5.4"
   }
 }
