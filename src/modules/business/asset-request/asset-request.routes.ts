@@ -79,12 +79,14 @@ const registrarRoutes = new Elysia()
     {
       params: assignNumberParams,
       body: assignNumberBody,
-      // transform ทำงาน "ก่อน" validation — เป็นที่เดียวที่ normalize ได้โดยที่ pattern
-      // ยังเข้มเหมือนเดิม (ถ้าไป normalize ในเป็น service ต้องปล่อย schema ให้หลวมก่อน
-      // แล้ว 422 ที่บอกรูปแบบชัด ๆ จะหายไป)
+      // transform ทำงาน "ก่อน" validation — ต้อง trim ที่นี่ ไม่ใช่ใน service ไม่งั้น
+      // minLength: 1 ของ assignNumberBody จะปล่อยค่าที่เป็นช่องว่างล้วนผ่านเข้าไปได้
       //
       // เลขใน SAP เป็นตัวใหญ่เสมอ — 'com-775-26-050' คือเจตนาถูกแค่พิมพ์เล็ก ไม่ใช่ค่าผิด
       // ส่วน trim กัน copy-paste จาก Excel/อีเมลที่ติดช่องว่างหัวท้ายมาด้วย
+      //
+      // ★ toUpperCase ยังอยู่แม้ถอด pattern ออกแล้ว — เลขในทะเบียนเป็นตัวใหญ่ทั้งหมด
+      //   ปล่อยตัวเล็กผ่านจะได้เลขที่ uq_asset_number มองเป็นคนละตัวกับของเดิม
       transform({ body }) {
         const b = body as { assetNumber?: unknown } | undefined;
         if (typeof b?.assetNumber === 'string') {
@@ -126,7 +128,17 @@ const registrarRoutes = new Elysia()
     ({ params, currentUser }) =>
       assetRequestService.uncancelAsset(params.id, params.assetId, currentUser.id),
     { params: assignNumberParams },
-  );
+  )
+  // ── ใบที่การแจ้งเตือนไม่ถึงปลายทาง (A) ─────────────────────────────────────
+  //
+  // ★ ต้องมาก่อน '/:id' ของ assetRequestRoutes ไม่ได้ — คนละ Elysia instance และ
+  //   registrarRoutes ถูก .use() ก่อน จึงชนะอยู่แล้ว (segment คงที่ชนะ dynamic ด้วย)
+  //
+  // อยู่ใน registrarRoutes จึงได้ requireRole(REGISTRAR_ROLES) ฟรี — บัญชี/แอดมินคือคน
+  // ที่เฝ้าคิวนี้อยู่แล้ว และการเปิดให้ทุกคนเห็นเท่ากับเปิดรายการใบของคนอื่นทั้งระบบ
+  // ★ เหลือเฉพาะสองอาการที่ "บัญชีเป็นคนกดแก้" — แจ้งปิดงาน/ตีกลับล้ม ซึ่งกู้ด้วยการกด
+  //   ปุ่มเดิมซ้ำ ส่วนการ์ดที่ไม่ถึงหัวหน้าย้ายไปฝั่งผู้ขอแล้ว (เขาเป็นคนเดือดร้อนและกดเองได้)
+  .get('/notify-stuck', () => assetRequestService.listStuckNotifications());
 
 export const assetRequestRoutes = new Elysia({ prefix: '/asset-requests' })
   .use(authGuard)
@@ -186,6 +198,24 @@ export const assetRequestRoutes = new Elysia({ prefix: '/asset-requests' })
   .post('/:id/submit', ({ params, body, currentUser }) => assetRequestService.submitRequest(params.id, body.expectedUpdatedAt, currentUser.id), {
     params: requestIdParams,
     body: submitBody,
+  })
+  // ใบของตัวเองที่ส่งไปแล้วแต่การ์ดไม่ถึงหัวหน้า — scope ด้วย currentUser.id ที่ service
+  // ไม่รับ userId จาก client จึงไม่มีทางถามหาใบของคนอื่น (หลักเดียวกับ GET '/')
+  .get('/my-notify-stuck', ({ currentUser }) =>
+    assetRequestService.listMyStuckNotifications(currentUser.id))
+  // ── ส่งการ์ดขออนุมัติซ้ำ — ไม่แตะสถานะใบ
+  //
+  // ★ อยู่ในกลุ่มของผู้ขอ ไม่ใช่ registrarRoutes: การ์ดที่ไม่ถึงหัวหน้าทำให้ "ใบของผู้ขอ"
+  //   ค้าง เขาจึงเป็นคนที่รู้ก่อนและควรกดเองได้ ไม่ต้องรอบัญชีมาสังเกตให้
+  //
+  // ทางเดียวที่กู้เคสนี้ได้ — submit ซ้ำไม่ได้เพราะ isEditableStatus ปฏิเสธใบที่เป็น
+  // PENDING_APPROVAL ไปแล้ว (คอมเมนต์ใน submitRequest เตือนเรื่องนี้ไว้เอง)
+  //
+  // ไม่ต้อง requireRole — service เช็คความเป็นเจ้าของผ่าน assetRequestOpener เอง
+  // (ตัวเดียวกับที่ listMyDrafts ใช้กรอง) กดได้เฉพาะใบตัวเอง หนึ่งใบ = หนึ่งการ์ด
+  .post('/:id/notify-retry', ({ params, currentUser }) =>
+    assetRequestService.retryNotifyApprover(params.id, currentUser.id), {
+    params: requestIdParams,
   })
   .use(managerRoutes)
   // ต้องมาหลัง .get('/:id') ได้ — router ของ Elysia ให้ segment คงที่ชนะ dynamic เสมอ

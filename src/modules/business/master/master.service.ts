@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, ilike, or, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, ilike, isNotNull, or, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { db } from '@intrastucture/db';
 import {
@@ -6,18 +6,22 @@ import {
   assetLocation,
   assetSubLocation,
   category,
+  company,
   department,
   employee,
 } from '@intrastucture/db/schema';
 import { paginate, type Paginated } from '@common/pagination';
 import { requireScalar } from '@common/db-result';
 import type {
+  CompanyOption,
   DepartmentOption,
   EmployeeListInput,
   EmployeeOption,
   EmployeeRow,
+  FloorPlan,
   MasterListInput,
   MasterOption,
+  LocationOption,
   SubLocationOption,
   SubLocationRow,
 } from './master.types';
@@ -44,6 +48,7 @@ export async function findDepartments(input: MasterListInput = {}): Promise<Depa
       name: department.name,
       shortName: department.shortName,
       departmentId: department.departmentId,
+      companyCode: department.companyCode,
     })
     .from(department)
     .where(
@@ -55,6 +60,27 @@ export async function findDepartments(input: MasterListInput = {}): Promise<Depa
     // เรียงตามชื่อไม่ใช่ id — Postgres ไม่การันตีลำดับแถวเมื่อไม่สั่ง ORDER BY
     // ลำดับจะสลับเองหลัง VACUUM หรือหลัง import รอบใหม่ แล้วคนที่ชินตำแหน่งจะเลือกผิด
     .orderBy(asc(department.name));
+}
+
+// ── company ────────────────────────────────────────────────────────────────
+
+/**
+ * บริษัทที่เอาไปเป็นตัวกรองได้ — เอาเฉพาะที่เปิดใช้อยู่
+ *
+ * ★ จำเป็นต้องมีเส้นของตัวเอง ไม่ใช่ให้หน้าจอ derive เอาจากรายชื่อแผนก: การ derive
+ *   ทำให้ตัวกรองบริษัทหายทั้งตัวเมื่อ /master/departments พัง ทั้งที่สองอย่างนี้
+ *   ไม่ได้เกี่ยวกัน และบริษัทที่ยังไม่มีแผนกจะไม่โผล่ให้เลือกทั้งที่มีสินทรัพย์อยู่
+ *
+ * ไม่กรอง sapDbName ต่างจาก dropdown บน Dashboard — ที่นี่เป็นตัวกรอง "ของที่มีอยู่แล้ว"
+ * ไม่ใช่ "ที่ไหนจะมีของไหลเข้ามา" บริษัทที่เลิกต่อ SAP แล้วแต่ยังมีของค้างต้องยังค้นเจอ
+ */
+export async function findCompanies(): Promise<CompanyOption[]> {
+  return db
+    .select({ code: company.code, name: company.name })
+    .from(company)
+    .where(eq(company.isActive, true))
+    // เรียงตามรหัสให้ลำดับคงที่ทุกครั้ง (เหตุผลเดียวกับ orderBy ของ findDepartments)
+    .orderBy(asc(company.code));
 }
 
 // ── category ───────────────────────────────────────────────────────────────
@@ -79,14 +105,24 @@ export async function findCategories(input: MasterListInput = {}): Promise<Maste
 
 // ── asset location / sub location ──────────────────────────────────────────
 
-export async function findLocations(input: MasterListInput = {}): Promise<MasterOption[]> {
+/**
+ * สถานที่สำหรับ dropdown = "สถานที่ทางบัญชี" เท่านั้น
+ *
+ * ตัดแถวที่เป็นตึกของผัง (isPlanArea, เพิ่มใน 0022 ให้ห้องมีที่ห้อย) ออกเสมอ แม้ตอนขอ
+ * includeInactive ก็ไม่คืน — มันไม่ใช่ตัวเลือกที่ผู้ใช้ควรเห็นในฟอร์มไม่ว่ากรณีไหน
+ * เผลอเลือกเข้าไปแล้วยอดจะไปโผล่ผิดสถานที่ในรายงานบัญชีโดยไม่มีอะไรฟ้อง
+ * (ตึกที่ของตั้งอยู่จริง derive จาก asset.subLocationId ไม่ได้มาจากช่องนี้)
+ */
+export async function findLocations(input: MasterListInput = {}): Promise<LocationOption[]> {
   const search = input.search?.trim();
 
   return db
-    .select({ id: assetLocation.id, name: assetLocation.name })
+    // outPlan ไปด้วยเสมอ — ฟอร์มต้องรู้ตั้งแต่ตอนผู้ใช้เลือก ว่าสถานที่นี้ต้องมีห้อง+หมุดไหม
+    .select({ id: assetLocation.id, name: assetLocation.name, outPlan: assetLocation.outPlan })
     .from(assetLocation)
     .where(
       and(
+        eq(assetLocation.isPlanArea, false),
         activeFilter(assetLocation.isActive, input.includeInactive),
         search ? ilike(assetLocation.name, `%${search}%`) : undefined,
       ),
@@ -107,7 +143,7 @@ export async function findLocations(input: MasterListInput = {}): Promise<Master
 export function subLocationName(row: Pick<SubLocationRow, 'id' | 'floor' | 'room' | 'remark'>): string {
   const parts = [
     row.floor ? `ชั้น ${row.floor}` : null,
-    row.room ? `ห้อง ${row.room}` : null,
+    row.room ? `${row.room}` : null,
   ].filter(Boolean);
 
   if (parts.length) return parts.join(' / ');
@@ -143,6 +179,63 @@ export async function findSubLocations(input: MasterListInput = {}): Promise<Sub
   return rows.map(
     (r): SubLocationOption => ({ id: r.id, name: subLocationName(r), locationId: r.locationId }),
   );
+}
+
+/**
+ * GET /master/floor-plans — ห้องที่ trace ขอบเขตไว้แล้ว จัดกลุ่มตามผังชั้น (0022)
+ *
+ * เงื่อนไขคือ "มี planKey และมี polygon" ไม่ใช่ทุกห้อง: ห้องที่ยังไม่ได้ trace วาดบนแผนที่
+ * ไม่ได้อยู่แล้ว ส่งไปก็มีแต่จะกลายเป็นรายการที่กดแล้วไม่มีอะไรเกิดขึ้น
+ * (ไล่ดูว่าเหลือห้องไหนยังไม่ trace ใช้ docs/check-sub-location-plan.sql ข้อ 2)
+ *
+ * ไม่แบ่งหน้าและไม่กรองตามชั้น — ทั้งไซต์มี 57 ห้อง โหลดทีเดียวจบ แล้วสลับชั้นบนจอ
+ * ได้ทันทีโดยไม่ต้องรอโหลดใหม่ (หลักเดียวกับ findSubLocations)
+ */
+export async function findFloorPlans(): Promise<FloorPlan[]> {
+  const rows = await db
+    .select({
+      id: assetSubLocation.id,
+      code: assetSubLocation.code,
+      floor: assetSubLocation.floor,
+      room: assetSubLocation.room,
+      remark: assetSubLocation.remark,
+      planKey: assetSubLocation.planKey,
+      polygon: assetSubLocation.polygon,
+      locationId: assetSubLocation.locationId,
+      locationName: assetLocation.name,
+    })
+    .from(assetSubLocation)
+    .innerJoin(assetLocation, eq(assetLocation.id, assetSubLocation.locationId))
+    .where(
+      and(
+        activeFilter(assetSubLocation.isActive),
+        isNotNull(assetSubLocation.planKey),
+        isNotNull(assetSubLocation.polygon),
+      ),
+    )
+    .orderBy(asc(assetSubLocation.planKey), asc(assetLocation.code), asc(assetSubLocation.code));
+
+  const plans = new Map<string, FloorPlan>();
+  for (const r of rows) {
+    // planKey/polygon ผ่าน isNotNull มาแล้ว แต่ TS ยังไม่รู้ — กันไว้แทนการ cast ทิ้ง
+    if (!r.planKey || !r.polygon) continue;
+    let plan = plans.get(r.planKey);
+    if (!plan) {
+      plan = { planKey: r.planKey, floor: r.floor, rooms: [] };
+      plans.set(r.planKey, plan);
+    }
+    plan.rooms.push({
+      id: r.id,
+      code: r.code,
+      name: subLocationName(r),
+      room: r.room,
+      floor: r.floor,
+      locationId: r.locationId,
+      locationName: r.locationName,
+      polygon: r.polygon,
+    });
+  }
+  return [...plans.values()];
 }
 
 // ── employee ───────────────────────────────────────────────────────────────

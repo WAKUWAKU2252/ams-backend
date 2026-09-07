@@ -32,6 +32,10 @@ export interface FindPageParams {
   page: number;
   limit: number;
   search?: string;
+  /** กรองตามบริษัทเจ้าของใบ — ไม่ใส่ = ทุกบริษัท */
+  companyCode?: string;
+  /** ไม่ใส่ = 'date_desc' (ใหม่สุดก่อน) ตามพฤติกรรมเดิม */
+  sort?: 'date_desc' | 'date_asc';
 }
 
 /** สองสถานะที่แปะเพิ่มให้ทุกใบในหน้า list/detail */

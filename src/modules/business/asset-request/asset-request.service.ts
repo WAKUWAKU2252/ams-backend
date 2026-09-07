@@ -1,4 +1,4 @@
-import { and, count, desc, eq, getTableColumns, gt, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
+import { and, count, desc, eq, getTableColumns, gt, inArray, isNotNull, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { db } from '@intrastucture/db';
 import {
@@ -11,7 +11,7 @@ import {
   purchaseOrderItem,
   user,
 } from '@intrastucture/db/schema';
-import { ConflictError, NotFoundError } from '@common/errors';
+import { ConflictError, ForbiddenError, NotFoundError } from '@common/errors';
 import { paginate } from '@common/pagination';
 import { requireRow, requireScalar } from '@common/db-result';
 import { isUniqueViolation } from '@common/pg-error';
@@ -123,7 +123,7 @@ export async function getDraft(id: number, userId: number) {
   // ค่าเลยเป็น undefined เงียบ ๆ ไม่มี error อะไรฟ้อง) คืนมาจากที่เดียวจึงไม่มีอะไรให้ลืม
   //
   // ชื่อ field ตรงกับที่ GET /purchase-orders/:poNumber คืน เพื่อให้ทั้งสองเส้นใช้ type เดียวกันได้
-  const target = await poService.findApprovalTarget(request.purchaseOrder.ownerPrId);
+  const target = await poService.findApprovalTarget(request.purchaseOrder.companyCode, request.purchaseOrder.ownerPrId);
 
   // lock ไม่อยู่ที่ DB แล้ว — สถานะ lock จริงมาจากสาย presence (registry in-memory) ที่ frontend เปิดเอง
   return {
@@ -321,7 +321,7 @@ async function assertSubmittable(requestId: number, poNumber: string) {
  */
 async function resolveApprovalTarget(poNumber: string) {
   const po = await db.query.purchaseOrder.findFirst({
-    columns: { ownerPrId: true, ownerPrName: true },
+    columns: { ownerPrId: true, ownerPrName: true, companyCode: true },
     where: eq(purchaseOrder.poNumber, poNumber),
   });
   if (!po?.ownerPrId) {
@@ -331,7 +331,7 @@ async function resolveApprovalTarget(poNumber: string) {
   }
 
   const who = po.ownerPrName ?? `OwnerPR id ${po.ownerPrId}`;
-  const target = await poService.findApprovalTarget(po.ownerPrId);
+  const target = await poService.findApprovalTarget(po.companyCode, po.ownerPrId);
 
   if (!target.managerEmployeeId) {
     throw new ConflictError(`แผนกของ ${who} ยังไม่ได้ตั้งหัวหน้า ตั้งหัวหน้าแผนกก่อนจึงจะส่งคำขอได้`);
@@ -347,6 +347,132 @@ async function resolveApprovalTarget(poNumber: string) {
     );
   }
   return target;
+}
+
+/**
+ * ใบที่ "แจ้งผลกลับผู้ขอ" ไม่ออก — คิวที่บัญชีเป็นคนกดแก้
+ *
+ * ── ทำไมต้องมีจอ ไม่ใช่แค่เก็บ error ไว้ในคอลัมน์
+ *
+ * ระบบบันทึกผลการแจ้งลงคอลัมน์อยู่แล้ว แต่ **ไม่มีใครอ่านมัน** — ค่าที่ไม่มีคนดูมีค่าเท่ากับ
+ * ไม่ได้เก็บ ใบที่อีเมลไม่ออกจึงเงียบอยู่ในฐานข้อมูลจนกว่าผู้ขอจะมาทวงเอง
+ *
+ * ── ★ ทำไมไม่รวม "การ์ดไม่ถึงหัวหน้า" ไว้ที่นี่ด้วย
+ *
+ * เพราะคนละคนเดือดร้อนและคนละคนกดแก้:
+ *
+ *   การ์ดไม่ถึงหัวหน้า → ใบ *ของผู้ขอ* ค้าง เขารู้ก่อนใครและกดส่งซ้ำเองได้
+ *                        (retryNotifyApprover ข้างล่าง ผูกกับ assetRequestOpener)
+ *                        เอามาไว้ที่บัญชีคือให้คนที่ไม่เดือดร้อนเฝ้าแทนคนที่เดือดร้อน
+ *
+ *   แจ้งปิดงาน/ตีกลับล้ม → ผู้ขอเดือดร้อน (ไม่รู้ผล) แต่ **กดเองไม่ได้** ปุ่มอยู่ที่บัญชี
+ *                          ทั้งคู่ไม่ปิดรอบเมื่อส่งล้ม (closesRound = !sendFailed) จึงกู้ด้วย
+ *                          การกดปุ่มเดิมซ้ำ ไม่ต้องมี endpoint ส่งซ้ำแยก
+ *
+ * ไม่แบ่งหน้า: ตัวเลขนี้ควรเป็นศูนย์เกือบตลอดเวลา ถ้าโตจนต้องแบ่งหน้าแปลว่ามีปัญหาที่ต้อง
+ * ไปแก้ที่ต้นเหตุ ไม่ใช่ที่การแสดงผล
+ */
+export async function listStuckNotifications() {
+  const rows = await db
+    .select({
+      id: assetRequest.id,
+      poNumber: assetRequest.poNumber,
+      status: assetRequest.status,
+      submittedAt: assetRequest.submittedAt,
+      notifiedAt: assetRequest.notifiedAt,
+      notifyError: assetRequest.notifyError,
+      completeNotifyError: assetRequest.completeNotifyError,
+      rejectNotifyError: assetRequest.rejectNotifyError,
+    })
+    .from(assetRequest)
+    .where(
+      or(isNotNull(assetRequest.completeNotifyError), isNotNull(assetRequest.rejectNotifyError)),
+    )
+    .orderBy(desc(assetRequest.id));
+
+  return rows.map((r) => ({
+    ...r,
+    kind: r.completeNotifyError ? ('COMPLETE' as const) : ('REJECT' as const),
+    reason: r.completeNotifyError ?? r.rejectNotifyError ?? '',
+  }));
+}
+
+/**
+ * ใบของ "ฉัน" ที่ส่งไปแล้วแต่การ์ดไม่ถึงหัวหน้า
+ *
+ * ★ ต้องมีเส้นของตัวเอง ไม่ใช่ไปโผล่ในลิสต์ปกติ — Draft.vue กรองแค่ DRAFT/REJECTED
+ *   ใบที่เป็น PENDING_APPROVAL จึงไม่แสดงที่ไหนเลยฝั่งผู้ขอ อาการนี้เลยไม่มีที่ยืน
+ *
+ * ★ scope ด้วย assetRequestOpener ตัวเดียวกับ listMyDrafts — ใบเป็นของกลางต่อ PO
+ *   คนเปิดได้หลายคน ไม่ใช่ createdBy คนเดียว
+ *
+ * ปกติต้องคืนลิสต์ว่าง ถ้ามีของแปลว่าใบนั้นค้างจริงและไม่มีใครรู้นอกจากเจ้าตัว
+ */
+export async function listMyStuckNotifications(userId: number) {
+  return db
+    .select({
+      id: assetRequest.id,
+      poNumber: assetRequest.poNumber,
+      submittedAt: assetRequest.submittedAt,
+      notifyError: assetRequest.notifyError,
+    })
+    .from(assetRequest)
+    .innerJoin(assetRequestOpener, eq(assetRequestOpener.requestId, assetRequest.id))
+    .where(
+      and(
+        eq(assetRequestOpener.userId, userId),
+        eq(assetRequest.status, 'PENDING_APPROVAL'),
+        isNull(assetRequest.notifiedAt),
+        isNull(assetRequest.deletedAt),
+      ),
+    )
+    .orderBy(desc(assetRequest.id));
+}
+
+/**
+ * ส่งการ์ดขออนุมัติซ้ำ — **ไม่แตะสถานะใบเลย**
+ *
+ * ทางเดียวที่กู้เคส NO_CARD ได้: submit ซ้ำไม่ได้เพราะ isEditableStatus() ปฏิเสธใบที่เป็น
+ * PENDING_APPROVAL ไปแล้ว (ตามที่คอมเมนต์ใน submitRequest เตือนไว้เอง)
+ *
+ * ★ ไม่เช็คว่า notifiedAt เป็น NULL ก่อน — ตั้งใจให้กดซ้ำได้แม้เคยส่งผ่านแล้ว เพราะ
+ *   "ส่งผ่าน" หมายถึง Power Automate ตอบ 200 ไม่ได้แปลว่าการ์ดถึงตาหัวหน้าจริง
+ *   (flow ปลายทางอาจตอบ 200 แล้วไม่มีอะไรออก — เคสที่ debug ยากที่สุดตามที่ env.ts เตือน)
+ *   ผลข้างเคียงคือหัวหน้าอาจได้การ์ดซ้ำ ซึ่งยอมรับได้กว่าไม่ได้เลย
+ *
+ * resolveApprovalTarget() โยน ConflictError พร้อมข้อความที่บอกว่าต้องไปแก้อะไร ถ้าหัวหน้า
+ * ยังไม่มีอีเมล/บัญชี — ปล่อยให้ทะลุขึ้นไปตามเดิม อย่าห่อเป็น "ส่งไม่สำเร็จ" เฉย ๆ
+ */
+export async function retryNotifyApprover(id: number, userId: number) {
+  const req = await requireRequest(id);
+  if (req.status !== 'PENDING_APPROVAL') {
+    throw new ConflictError(
+      `ส่งการ์ดซ้ำได้เฉพาะใบที่รออนุมัติอยู่ — ใบนี้สถานะ ${req.status}`,
+    );
+  }
+
+  /**
+   * ★ เจ้าของใบเท่านั้น — ผู้ขอคือคนที่เดือดร้อนจากการ์ดที่ไม่ถึง จึงควรเป็นคนกดเอง
+   *   ไม่ต้องรอบัญชีมาสังเกตให้
+   *
+   * ใช้ assetRequestOpener เป็นตัวตัดสินความเป็นเจ้าของ ตัวเดียวกับที่ listMyDrafts ใช้กรอง
+   * (ใบเป็นของกลางต่อ PO — คนเปิดได้หลายคน ไม่ใช่ createdBy คนเดียว)
+   *
+   * ขอบเขตของความเสียหายถ้าใครกดรัว: การ์ดของใบตัวเองไปหาหัวหน้าตัวเอง หนึ่งใบ —
+   * ต่างจากตอนที่จำกัดไว้ที่ REGISTRAR_ROLES ซึ่งกดยิงใบของใครก็ได้ทั้งระบบ
+   */
+  const [owner] = await db
+    .select({ userId: assetRequestOpener.userId })
+    .from(assetRequestOpener)
+    .where(and(eq(assetRequestOpener.requestId, id), eq(assetRequestOpener.userId, userId)))
+    .limit(1);
+  if (!owner) {
+    throw new ForbiddenError('ส่งการ์ดซ้ำได้เฉพาะใบที่ตัวเองเปิดอยู่');
+  }
+
+  const target = await resolveApprovalTarget(req.poNumber);
+  const notify = await notifyApprover(id, userId, target);
+  return { notified: notify.ok, notifyError: notify.ok ? null : notify.message };
 }
 
 export async function submitRequest(id: number, expectedUpdatedAt: string, userId: number) {
@@ -842,7 +968,18 @@ export async function assignAssetNumber(
         id: asset.id,
         origin: asset.origin,
         description: asset.description,
-        acquisitionDate: asset.acquisitionDate,
+        // ★ sapCreatedDate ไม่ใช่ acquisitionDate — เปลี่ยนเพราะตัวเดิมตอบคำถามนี้ไม่ได้
+        //
+        //   acquisitionDate = วันตั้งหนี้ มาจาก MIN(OPCH.DocDate) ผ่าน LEFT JOIN ใบกำกับ
+        //   ซึ่งของเก่าราวครึ่งหนึ่งไม่มีใบกำกับเลย (ยกยอดมา) → NULL และแถว PO_FLOW เป็น
+        //   NULL ทุกแถวเสมอ เพราะไม่มีใครฝั่ง AMS เขียนคอลัมน์นี้ (มีแต่ connector)
+        //   ผลคือข้อความเตือนขึ้น '-' บ่อยกว่าขึ้นวันที่จริง
+        //
+        //   sapCreatedDate = OITM.CreateDate วันที่บัญชีออกเลขให้ มีครบทุกแถวฝั่ง SAP
+        //   และ connector เติมให้แถว PO_FLOW ด้วย — ตรงกับคำถามที่บัญชีถามตอนเจอเลขซ้ำ
+        //   พอดี ("เลขนี้ถูกออกให้ของชิ้นไหนไปแล้วเมื่อไหร่") และเป็นตัวเดียวกับที่หน้าจอ
+        //   ใช้เป็น 'ลงทะเบียนเมื่อ' อยู่แล้ว (ดู AssetTable.vue) คนอ่านจึงเทียบกันได้ตรง ๆ
+        sapCreatedDate: asset.sapCreatedDate,
       })
       .from(asset)
       // ไม่นับตัวเอง — แก้เลขชิ้นเดิมโดยส่งเลขเดิมกลับมา (หรือกดซ้ำ) ต้องไม่ฟ้องว่าชนกับตัวเอง
@@ -860,7 +997,7 @@ export async function assignAssetNumber(
       const from = clash.origin === 'SAP_LEGACY' ? 'ดึงมาจาก SAP' : 'ลงทะเบียนผ่าน AMS';
       throw new ConflictError(
         `เลข ${assetNumber} ถูกใช้แล้วโดยสินทรัพย์ id ${clash.id} (${from}) ` +
-          `"${clash.description ?? '-'}" วันที่ได้มา ${clash.acquisitionDate ?? '-'} — ` +
+          `"${clash.description ?? '-'}" ลงทะเบียนใน SAP เมื่อ ${clash.sapCreatedDate ?? '-'} — ` +
           `ถ้าเป็นของชิ้นเดียวกัน ให้ลบแถวนั้นก่อนแล้วกรอกใหม่`,
       );
     }
@@ -979,6 +1116,9 @@ export async function confirmRegistration(requestId: number, userId: number) {
       serialNumber: slot.serialNumber ?? '-',
       location: [slot.locationName, slot.subLocationName].filter(Boolean).join(' - ') || '-',
       ownerName: ownerNameOf(slot.employeeName),
+      // ค่าที่เก็บไว้ตอนออกเลข ไม่ประกอบใหม่จาก assetNumber — สติกเกอร์ที่แนบไปกับเมล
+      // ต้องตรงกับ QR ที่ระบบถืออยู่ ไม่ใช่ค่าที่ "ควรเป็น" ตาม APP_BASE_URL ของวันนี้
+      qrCode: slot.qrCode,
     }));
 
   const rejected = mine
@@ -1080,7 +1220,7 @@ export async function confirmRegistration(requestId: number, userId: number) {
   const sendFailed = send !== null && !send.ok;
   const notifyError =
     send === null
-      ? `ผู้ส่งคำขอ (${requesterName}) ไม่มีอีเมลในข้อมูลพนักงาน — ต้องแจ้งผลด้วยวิธีอื่นเอง`
+      ? `ผู้ส่งคำขอ (${requesterName}) ไม่มีอีเมลในข้อมูลพนักงาน ต้องแจ้งผลด้วยวิธีอื่นเอง`
       : send.ok
         ? null
         : send.message;

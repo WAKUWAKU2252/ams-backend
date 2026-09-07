@@ -1,6 +1,5 @@
 import {t} from 'elysia';
 import { paginationQuery } from '@common/pagination';
-import { ASSET_NUMBER_MAX_LENGTH, ASSET_NUMBER_MIN_LENGTH, ASSET_NUMBER_REGEX } from '@common/asset-number';
 
 // ไม่มี createBy — identity มาจาก token (currentUser.id) เท่านั้น ห้ามรับจาก body
 export const createDraftBody = t.Object({
@@ -30,18 +29,30 @@ export const assignNumberParams = t.Object({
     assetId: t.Numeric(),
 })
 
-// pattern มาจาก @common/asset-number ที่เดียว ใช้ร่วมกับ LIKE ฝั่ง SAP — ห้ามพิมพ์ regex ซ้ำที่นี่
+// ── ไม่บังคับ pattern โดยตั้งใจ (ถอด ASSET_NUMBER_REGEX ออก) ─────────────────
+//
+// ASSET_NUMBER_REGEX คือ "สคีมาที่บริษัทตั้งใจ" ไม่ใช่ "ทุกอย่างที่มีอยู่จริงใน SAP" —
+// @common/asset-number บอกไว้เองว่าห้ามเอาไปคัดของทิ้ง และยกตัวอย่างของจริงที่ไม่เข้าสคีมา:
+//   MAC-300-13-001.1   ชิ้นส่วนย่อย ใช้จุด
+//   MAC-212-13-001/1   ถัง Silo ใช้ทับ
+//   MAC-1-21/12-002    เครื่องบรรจุ คนละสคีมาไปเลย
+// ตราบใดที่ pattern อยู่ตรงนี้ บัญชีพิมพ์เลขที่ SAP ออกให้จริงเข้า AMS ไม่ได้ — ติด 422
+// ทั้งที่ค่าที่พิมพ์ถูกต้อง ซึ่งเป็นอาการเดียวกับที่เคยทำให้สินทรัพย์ 396 ชิ้นตกหล่นทั้งชุด
+//
+// หลักเดียวกับ assetByNumberQuery ใน asset.schema.ts ที่ถอด pattern ออกไปก่อนแล้วด้วย
+// เหตุผลเดียวกัน — regex ยังทำหน้าที่ "ติดธง" ต่อไป (isAssetNumber ฝั่ง sync) แต่ไม่ใช่
+// ด่านที่ปฏิเสธค่าที่คนกรอก
+//
+// maxLength 100 = ความกว้างจริงของคอลัมน์ asset.assetNumber (varchar(100)) ไม่ใช่ตัวเลข
+// ที่เดาจากรูปแบบ — ตัวที่กันของยาวเกินคือ DB ไม่ใช่สคีมาที่นี่
+//
 // ไม่มี lifecycle/requestId ใน body: สองอย่างนั้น service เป็นคนตัดสินจาก state ปัจจุบัน
 export const assignNumberBody = t.Object({
     assetNumber: t.String({
-        pattern: ASSET_NUMBER_REGEX.source,
-        // ท่อนท้ายยาวไม่เท่ากัน (3–7 ตัว) จึงเป็นช่วง ไม่ใช่ความยาวตายตัวเหมือนเดิม
-        minLength: ASSET_NUMBER_MIN_LENGTH,
-        maxLength: ASSET_NUMBER_MAX_LENGTH,
-        // ขึ้นบน error 422 ตรง ๆ — "ไม่ตรง pattern" อย่างเดียวผู้ใช้เดาไม่ออกว่าต้องพิมพ์ยังไง
-        error:
-          'เลขสินทรัพย์ต้องอยู่ในรูปแบบ XXX-###-##-<ท่อนท้าย 3-7 ตัว> ' +
-          'เช่น COM-775-26-050 หรือ FAB-200-14-B101',
+        // transform ใน routes trim ให้ก่อน validation แล้ว — minLength 1 จึงกันช่องว่างล้วนได้จริง
+        minLength: 1,
+        maxLength: 100,
+        error: 'ต้องกรอกเลขสินทรัพย์ และยาวได้ไม่เกิน 100 ตัวอักษร',
     }),
 })
 

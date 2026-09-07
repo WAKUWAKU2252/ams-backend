@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { db } from '@intrastucture/db';
-import { user, role, employee, department } from '@intrastucture/db/schema';
+import { user, role, employee, employeeCompany, department } from '@intrastucture/db/schema';
 import { BadRequestError, ConflictError } from '@common/errors';
 import { requireRow } from '@common/db-result';
 import { isUniqueViolation, pgConstraint } from '@common/pg-error';
@@ -61,7 +61,12 @@ export async function createUser(input: CreateUserInput): Promise<PublicUser> {
 const UNIQUE_MESSAGE: Record<string, string> = {
   uq_employee_email: 'อีเมลนี้มีพนักงานคนอื่นใช้อยู่แล้ว — ถ้าเป็นคนเดียวกัน ให้ใช้โหมด "ผูกพนักงานที่มีอยู่" แทนการสร้างใหม่',
   uq_employee_emp_id: 'รหัสพนักงานนี้ถูกใช้แล้ว — ตรวจสอบว่าคนนี้มีอยู่ในระบบแล้วหรือยัง',
-  uq_employee_owner_code: 'OwnerCode นี้ถูกใช้แล้ว — เป็นรหัสที่ SAP ใช้อ้างผู้ขอบน PO ซ้ำกันไม่ได้',
+  // ชื่อ constraint เปลี่ยนตามที่เก็บ OwnerCode: employee.ownerCode (ก่อน 0021) →
+  // ownerCodeUba/Ubp (0021) → employee_company (0025) — คีย์เก่าไม่มีในฐานแล้ว
+  // ปล่อยชื่อเก่าไว้ = ข้อความนี้ไม่มีวันถูกใช้ แล้วผู้ใช้จะได้ 'ข้อมูลซ้ำ' ลอย ๆ แทน
+  uq_employee_company_owner_code:
+    'OwnerCode นี้ถูกใช้แล้วในบริษัทเดียวกัน — เป็นรหัสที่ SAP ใช้อ้างผู้ขอบน PO ซ้ำกันไม่ได้ ' +
+    '(รหัสเดียวกันข้ามบริษัทใช้ได้ ถ้าตั้งใจแบบนั้นให้ตรวจว่าเลือกแผนกถูกบริษัทแล้ว)',
   uq_user_username: 'username นี้ถูกใช้แล้ว',
   uq_user_employee: 'พนักงานคนนี้มีบัญชีผู้ใช้อยู่แล้ว — 1 พนักงานมีได้บัญชีเดียว',
 };
@@ -90,6 +95,23 @@ async function runInsert(input: CreateUserInput, passwordHash: string): Promise<
 
     if (input.employee) {
       const e = input.employee;
+
+      // ── บริษัทของพนักงานใหม่มาจาก "แผนกที่เลือก" ไม่ใช่ค่าตั้งต้น (0025) ──────
+      //
+      // เดิมบรรทัดนี้เขียน ownerCodeUba ตายตัวโดยถือว่าคนที่สร้างผ่านหน้าจอเป็นคนของ UBA
+      // ซึ่งใช้ไม่ได้แล้วตั้งแต่ department เป็นของบริษัท (0024) — คนที่ถูกสร้างให้แผนกของ
+      // UBP/MIG จะได้ตัวตนฝั่ง UBA แทน แล้ว PO ของบริษัทเขาจะ resolve ผู้ขอไม่เจอ
+      //
+      // ★ ไม่ต้องเพิ่มช่องให้กรอกบนหน้าจอ: แผนกพก companyCode มาให้อยู่แล้ว และการอ่านจาก
+      //   แผนกยังการันตีว่า composite FK ของ employee_company ผ่านแน่นอน (แผนกกับแถวนี้
+      //   เป็นบริษัทเดียวกันโดยนิยาม) — เดาบริษัทเองเมื่อไหร่ FK จะปฏิเสธให้เห็นทันที
+      const [dept] = await tx
+        .select({ companyCode: department.companyCode })
+        .from(department)
+        .where(eq(department.id, e.departmentId))
+        .limit(1);
+      if (!dept) throw new BadRequestError(`ไม่พบแผนก id ${e.departmentId}`);
+
       const inserted = await tx
         .insert(employee)
         .values({
@@ -97,17 +119,24 @@ async function runInsert(input: CreateUserInput, passwordHash: string): Promise<
           lastName: e.lastName ?? null,
           firstNameEn: e.firstNameEn ?? null,
           lastNameEn: e.lastNameEn ?? null,
-          // สามช่องนี้เป็น unique ที่ยอมให้ NULL ซ้ำได้ — ส่งสตริงว่างมาแทน NULL เมื่อไหร่
+          // สองช่องนี้เป็น unique ที่ยอมให้ NULL ซ้ำได้ — ส่งสตริงว่างมาแทน NULL เมื่อไหร่
           // คนที่สองจะสร้างไม่ได้เลยเพราะ '' ชนกับ '' (ต่างจาก NULL ที่ซ้ำได้)
           empId: e.empId?.trim() || null,
           email: e.email?.trim() || null,
-          // ช่องของ UBA — คนที่สร้างผ่านหน้าจอเป็นพนักงาน UBA เป็นค่าตั้งต้น (0021)
-          // คน UBP ต้องเติม ownerCodeUbp ทีหลัง ยังไม่มีหน้าจอให้กรอกสองช่อง
-          ownerCodeUba: e.ownerCode ?? null,
           departmentId: e.departmentId,
         })
         .returning();
       employeeId = requireRow(inserted, `insert employee (${e.firstName})`).id;
+
+      // ★ ต้องสร้างคู่กันเสมอ — พนักงานที่ไม่มีแถวนี้จะ "มีอยู่" แต่ระบบหาผู้อนุมัติของเขา
+      //   ไม่เจอ (findApprovalTarget อ่านจากตารางนี้ที่เดียว) แล้วเขาจะส่งคำขอไม่ได้เลย
+      //   โดยไม่มีอะไรบอกว่าทำไม — อยู่ในทรานแซกชันเดียวกันจึงไม่มีทางเกิดครึ่งเดียว
+      await tx.insert(employeeCompany).values({
+        employeeId,
+        companyCode: dept.companyCode,
+        ownerCode: e.ownerCode ?? null,
+        departmentId: e.departmentId,
+      });
     }
 
     return requireRow(

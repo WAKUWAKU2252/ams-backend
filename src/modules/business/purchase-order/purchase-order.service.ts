@@ -5,7 +5,7 @@ import { NotFoundError } from '@common/errors';
 import { paginate } from '@common/pagination';
 import { requireScalar } from '@common/db-result';
 import { APPROVER_ROLE_LIST } from '@common/roles';
-import { employee, role, user } from '@intrastucture/db/schema';
+import { employee, employeeCompany, role, user } from '@intrastucture/db/schema';
 import type {
   FindPageParams,
   LineTotals,
@@ -198,16 +198,34 @@ const NO_APPROVAL_TARGET: PoApprovalTarget = {
   managerEmail: null,
 };
 
-export async function findApprovalTarget(ownerPrId: number | null): Promise<PoApprovalTarget> {
+export async function findApprovalTarget(
+  companyCode: string,
+  ownerPrId: number | null,
+): Promise<PoApprovalTarget> {
   if (!ownerPrId) return NO_APPROVAL_TARGET;
 
-  const emp = await db.query.employee.findFirst({
-    columns: { departmentId: true },
-    where: (table, { eq }) => eq(table.id, ownerPrId),
-  });
-  if (!emp?.departmentId) return NO_APPROVAL_TARGET;
+  // ── แผนกต้องมาจาก "บริษัทของใบ PO" ไม่ใช่จากตัวคน (0025) ────────────────────
+  //
+  // เดิมอ่าน employee.departmentId ซึ่งมีค่าเดียวต่อคน แต่ department เป็นของบริษัท (0024)
+  // — วัดจริงพบว่า 241 จาก 288 คนที่มีตัวตนใน SAP อยู่สองบริษัท และทุกคนผูกกับแผนกของ UBA
+  // ผลคือ PO ของ UBP/MIG ไต่ไปจบที่หัวหน้าฝั่ง UBA เสมอ = การ์ดขออนุมัติไปหาคนผิด
+  //
+  // ★ ไม่มีแถว หรือมีแถวแต่ departmentId ว่าง → ตอบ "ไม่รู้" **ห้ามถอยไปใช้
+  //   employee.departmentId** การถอยคือการกลับไปเป็นบั๊กเดิมแบบเงียบ ๆ ทันที
+  //   ปลายทางของ "ไม่รู้" คือ submitRequest โยน ConflictError ให้คนไปเติมข้อมูล (ล้มดัง)
+  const [link] = await db
+    .select({ departmentId: employeeCompany.departmentId })
+    .from(employeeCompany)
+    .where(
+      and(
+        eq(employeeCompany.employeeId, ownerPrId),
+        eq(employeeCompany.companyCode, companyCode),
+      ),
+    )
+    .limit(1);
+  if (!link?.departmentId) return NO_APPROVAL_TARGET;
 
-  const departmentId = emp.departmentId;
+  const departmentId = link.departmentId;
   const dept = await db.query.department.findFirst({
     columns: { managerId: true, name: true },
     where: (table, { eq }) => eq(table.id, departmentId),
@@ -265,14 +283,14 @@ export async function findOneOrFail(poNumber: string) {
     where: (po, { eq }) => eq(po.poNumber, poNumber),
     with: {
       items: {
-        orderBy: (item, { asc }) => [asc(item.poLine)],
+        orderBy: (item, { asc }) => [asc(item.poLine )],
         with: { grpoLines: { with: { grpo: true }, orderBy: (line, { asc }) => [asc(line.grpoId)] } },
       },
     },
   });
   if (!po) throw new NotFoundError(`Purchase order ${poNumber}`);
 
-  const target = await findApprovalTarget(po.ownerPrId);
+  const target = await findApprovalTarget(po.companyCode, po.ownerPrId);
 
   const registered = await registeredByItem([poNumber]);
   const items = po.items.map((item) => withLineTotals(item, registered));
@@ -290,20 +308,29 @@ export async function findOneOrFail(poNumber: string) {
   };
 }
 
-export async function findPage({ page, limit, search }: FindPageParams) {
+export async function findPage({ page, limit, search, companyCode, sort }: FindPageParams) {
   // ── ค้นแบบ "มีอยู่ในสตริง" ไม่ใช่ "ขึ้นต้นด้วย" (0021)
   //
   // ตั้งแต่เลข PO เก็บพร้อม prefix ('APO-62605007') การค้นแบบขึ้นต้นทำให้คนที่พิมพ์
   // เลขเปล่า '62605007' ตามความเคยชินหาไม่เจอเลย ทั้งที่ใบนั้นมีอยู่
   // ยอมแลกกับการที่ pg ใช้ index ไม่ได้ — ตาราง PO มีหลักร้อยแถว ไม่ใช่คอขวด
-  const where = search
-    ? or(ilike(purchaseOrder.poNumber, `%${search}%`), ilike(purchaseOrder.vendorName, `%${search}%`))
-    : undefined;
+  // and() ตัด undefined ทิ้งให้เอง — ไม่ส่งตัวกรองมาเลยก็ได้ where เป็น undefined เหมือนเดิม
+  // (ต้องเป็นแบบนี้ หน้า autocomplete เดิมยิงมาโดยไม่มี companyCode และต้องได้ผลเท่าเดิม)
+  const where = and(
+    search
+      ? or(ilike(purchaseOrder.poNumber, `%${search}%`), ilike(purchaseOrder.vendorName, `%${search}%`))
+      : undefined,
+    companyCode ? eq(purchaseOrder.companyCode, companyCode) : undefined,
+  );
 
   const [rows, totalResult] = await Promise.all([
     db.query.purchaseOrder.findMany({
       where,
-      orderBy: (po, { desc, asc }) => [desc(po.poDate), asc(po.poNumber)],
+      // ★ poNumber เป็น tiebreak เสมอ ไม่ใช่ของแถม — poDate ซ้ำกันได้เยอะ (วันเดียวหลายใบ)
+      //   ถ้าไม่มีตัวตัดสิน pg ไม่การันตีลำดับ แล้วแถวจะสลับที่ระหว่างหน้า ทำให้เลื่อนหน้า
+      //   แล้วเห็นใบเดิมซ้ำหรือข้ามใบไปเลย (คลาสเดียวกับ orderBy ของ findDepartments)
+      orderBy: (po, { desc, asc }) =>
+        sort === 'date_asc' ? [asc(po.poDate), asc(po.poNumber)] : [desc(po.poDate), asc(po.poNumber)],
       limit,
       offset: (page - 1) * limit,
     }),
