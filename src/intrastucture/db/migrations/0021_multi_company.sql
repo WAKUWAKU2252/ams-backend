@@ -20,7 +20,7 @@
 --    (drizzle เทียบ migration ที่รันแล้วด้วยลำดับเวลา ไม่ได้ตรวจ hash ซ้ำ จึงไม่ฟ้องอะไร)
 --    ฐานที่ migrate ใหม่จากศูนย์จะไม่มีตารางนี้ตั้งแต่แรก — ปลายทางตรงกันทั้งสองทาง
 --
--- ข้อมูลเดิมทั้งหมดใน ams_db เป็นของ UBA (ยืนยันแล้ว: sync ต่อ SBO_PRD_UBA ฐานเดียว
+-- ข้อมูลเดิมทั้งหมดใน ams_db เป็นของ UBA (ยืนยันแล้ว: sync ต่อฐาน SAP ของ UBA ฐานเดียว
 -- มาตลอด และ poNumber ทุกแถวเป็นตัวเลขล้วน = ไม่เคยมี prefix ของบริษัทอื่นปน)
 -- ═══════════════════════════════════════════════════════════════════════════
 
@@ -42,17 +42,22 @@ CREATE TABLE "company" (
 -- 7 บริษัทตามที่ระบบ HR ระบุ (docs/Book1.xlsx Sheet1) — 5 บริษัทล่างไม่มี SAP
 -- sapDbName เป็น NULL จึงตอบในตัวว่าทำไมไม่มี prefix/itemGroups
 --
--- ⚠️ ช่อง name ของ UBA/UBP ใส่รหัสไว้ก่อน — เปลี่ยนเป็นชื่อนิติบุคคลเต็มได้ตามสะดวก
+-- ⚠️ ชื่อนิติบุคคลเต็มและชื่อฐาน SAP จริง **ถูกถอดออกจาก git โดยตั้งใจ** — ที่นี่ seed
+--    ไว้แค่รหัสบริษัท ส่วนค่าจริงอยู่ใน docs/seed-company.sql ซึ่งไม่ขึ้น git
+--    ฐานที่ apply ไฟล์นี้ไปแล้วมีค่าจริงอยู่ครบ ไม่ได้รับผลอะไร (drizzle เทียบด้วย
+--    ลำดับเวลา ไม่ได้ตรวจ hash — ดูหมายเหตุข้อ 3 ข้างบน) แต่ฐานที่ migrate ใหม่
+--    จากศูนย์ต้องรัน seed-company.sql ต่อท้าย ★ ไม่รัน = sapDbName เป็น NULL ทั้งชุด
+--    แปลว่า sync จะข้ามทุกบริษัทแบบเงียบ ๆ (ดู sync.service.ts: กรอง isNotNull ทิ้ง)
 -- ⚠️ itemGroups: UBA ใช้ 117 · UBP ใช้ 110 (ยืนยันจาก OITB: กลุ่ม 110 ของ UBP ชื่อ
 --    'Fixed Asset' มี 544 ตัว AssetClass ครบ 541 ส่วนกลุ่ม 117 ไม่มีอยู่ใน UBP เลย)
 INSERT INTO "company" ("code", "name", "sapDbName", "poPrefix", "grpoPrefix", "itemGroups") VALUES
-  ('UBA', 'UBA',                 'SBO_PRD_UBA', 'APO-', 'AGP-', '117'),
-  ('UBP', 'UBP',                 'SBO_PRD_UBP', 'PPO-', 'PGP-', '110'),
-  ('MIG', 'META INK GOLD',       NULL, NULL, NULL, NULL),
-  ('KCC', 'KAME CHEMICAL CAN',   NULL, NULL, NULL, NULL),
-  ('TTC', 'THAI TOP COAT GROUP', NULL, NULL, NULL, NULL),
-  ('KTN', 'KRITTANAN HOLDINGS',  NULL, NULL, NULL, NULL),
-  ('VTA', 'VITA',                NULL, NULL, NULL, NULL);--> statement-breakpoint
+  ('UBA', 'UBA', NULL, 'APO-', 'AGP-', '117'),
+  ('UBP', 'UBP', NULL, 'PPO-', 'PGP-', '110'),
+  ('MIG', 'MIG', NULL, NULL, NULL, NULL),
+  ('KCC', 'KCC', NULL, NULL, NULL, NULL),
+  ('TTC', 'TTC', NULL, NULL, NULL, NULL),
+  ('KTN', 'KTN', NULL, NULL, NULL, NULL),
+  ('VTA', 'VTA', NULL, NULL, NULL, NULL);--> statement-breakpoint
 
 -- ── 2. ถอดกติกา singleton ของ sync ออก (คนละบริษัทต้องมี watermark ของตัวเอง) ──
 ALTER TABLE "sap_asset_sync" DROP CONSTRAINT "ck_sap_asset_sync_singleton";--> statement-breakpoint

@@ -33,7 +33,8 @@ export const company = pgTable('company', {
   name: varchar({ length: 100 }).notNull(),
 
   // ── สามคอลัมน์ล่างมีค่าเฉพาะบริษัทที่ต่อ SAP ──────────────────────────────
-  // ชื่อฐานจริงใน SQL Server เช่น 'SBO_PRD_UBA' — connector ใช้เลือก pool
+  // ชื่อฐานจริงใน SQL Server ของบริษัทนั้น — connector ใช้เลือก pool
+  // ★ ค่าจริงอยู่ในฐานข้อมูลเท่านั้น ไม่เขียนลง git (seed จาก docs/seed-company.sql)
   // NULL = ไม่มี SAP, sync ข้ามบริษัทนี้ไปเลย
   sapDbName: varchar({ length: 50 }),
   // NNM1.BeginStr ของ ObjectCode 22 / 20 เช่น 'APO-' / 'AGP-'

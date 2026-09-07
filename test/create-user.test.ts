@@ -112,7 +112,7 @@ describe('createUser', () => {
   // อยู่แล้ว ได้ 500 "Internal server error" ซึ่งอ่านแล้วไม่รู้เลยว่าผิดตรงไหน
   // ต้องเป็น 409 ที่บอกว่าชนอะไรและให้ไปทำอะไรต่อ
   test('อีเมลซ้ำกับพนักงานที่มีอยู่ = 409 พร้อมบอกทางออก ไม่ใช่ 500', async () => {
-    const email = 'natdanai.s@ubisasia.com';
+    const email = 'somchai.k@example.com';
     await db.insert(employee).values({ firstName: 'คนเดิม', email, departmentId });
 
     expect(

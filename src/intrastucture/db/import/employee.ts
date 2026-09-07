@@ -32,7 +32,7 @@ const COMMIT = process.argv.includes('--commit');
  * บริษัทของไฟล์นี้ — ใช้ทั้งแปลง departmentKey -> department.id และเป็น companyCode
  * ของแถวที่เขียนลง employee_company
  *
- * ตรึงเป็น UBA ไม่รับจาก argv โดยตั้งใจ: employee.csv มาจาก OHEM ของ SBO_PRD_UBA
+ * ตรึงเป็น UBA ไม่รับจาก argv โดยตั้งใจ: employee.csv มาจาก OHEM ของฐาน SAP ฝั่ง UBA
  * ฐานเดียว การเปิดให้ส่งบริษัทอื่นเข้ามาแปลว่าเอาไฟล์ของ UBA ไปลงเป็นตัวตนของบริษัทอื่น
  * ซึ่งเลข OwnerCode ทับกัน 264 ตัว = ผูก PO เข้ากับคนผิดบริษัททั้งชุดโดยไม่มีอะไรฟ้อง
  * บริษัทอื่นต้องมีไฟล์และสคริปต์ของตัวเอง

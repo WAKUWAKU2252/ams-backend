@@ -27,7 +27,7 @@ ON CONFLICT ON CONSTRAINT "uq_category_code" DO NOTHING;--> statement-breakpoint
 -- ── ผูก asset_location กลับไปหา OLCT ของ SAP
 --
 -- 52 แถวนี้ import มาจาก OLCT โดยรักษาลำดับไว้ id จึงตรงกับ OLCT.Code พอดีทุกแถว
--- (ตรวจแล้วทั้ง 52: 1=QC, 15=VITA China, 26=IT-โรงงาน, 48=IT-OFFICE, 52=Customer Technical Service)
+-- (ตรวจครบทั้ง 52 แถวแล้วว่า id ตรงกับ OLCT.Code — สุ่มเทียบหัว/กลาง/ท้ายชุดทั้งหมด)
 -- คัดลอกได้ครั้งนี้ครั้งเดียวเพราะรู้ที่มา — หลังจากนี้ connector ต้องอ่านจากคอลัมน์นี้เท่านั้น
 -- ห้ามกลับไปใช้ id เทียบตรง ๆ: id เป็น serial ที่บนเครื่องอื่นหรือหลัง import รอบใหม่จะไม่ตรง
 --
