@@ -12,7 +12,7 @@ const triggerRoutes = new Elysia()
   // ต้องใส่ทุก role ในการเรียกครั้งเดียว — requireRole เป็น OR (role ไหนก็ได้ในลิสต์)
   // เรียกซ้อนสองครั้งจะกลายเป็น AND: hook ตัวที่สองโยน 403 ทิ้งทุกคนที่ผ่านตัวแรกมา
   // ซึ่งไม่มีทางผ่านได้เลยเพราะ user หนึ่งคนมี role เดียว
-  .use(requireRole('FINANCE', 'ADMIN'))
+  .use(requireRole('FINANCE', 'ADMIN', 'MANAGER'))
   // ทุกบริษัท ทุก entity — ผลคืนเป็น { [companyCode]: { purchase_order, grpo, asset } }
   .post('/', ({ currentUser }) => syncService.syncAll('BUTTON', currentUser.id))
   // ทุก entity ของบริษัทเดียว (0021)
@@ -29,8 +29,26 @@ const triggerRoutes = new Elysia()
     { params: t.Object({ company: t.String(), entity: t.String() }) },
   );
 
+// ── เส้นที่ "ทุกคนที่ล็อกอิน" เรียกได้ ────────────────────────────────────────
+//
+// ★ ต้องประกาศก่อน .use(triggerRoutes) เสมอ — requireRole ข้างในนั้นเป็น hook แบบ scoped
+//   ซึ่งมีผลกับ route ที่ประกาศ "หลัง" มันเท่านั้น ย้ายบล็อกนี้ลงไปอยู่ล่างเมื่อไหร่
+//   ปุ่มบนหน้าจอจะ 403 ให้ EMPLOYEE ทุกคนทันที โดยที่โค้ดยังหน้าตาถูกต้องอยู่
 export const syncRoutes = new Elysia({ prefix: '/sync' })
   .use(authGuard)
   // ใครก็ดูได้ — เป็นสถานะของ job ไม่ใช่ข้อมูลธุรกิจ (หน้าจอเอาไปโชว์ว่าข้อมูลสดแค่ไหน)
   .get('/status', () => syncService.getStatus())
+  // "ฉันสั่ง sync อะไรได้บ้าง" — หน้าจอใช้ตัดสินว่าจะวาดปุ่มยังไง (ดู getScope)
+  .get('/scope', ({ currentUser }) => syncService.getScope(currentUser))
+  // ★ ต้องมาก่อน '/company/:company/:entity' ของ triggerRoutes — ไม่งั้น 'documents'
+  //   จะถูกจับเป็นชื่อ entity แล้วตกด่าน requireRole กลายเป็น 403 ทั้งที่เส้นนี้เปิดให้ทุกคน
+  //
+  // ปุ่มบน TopBar เรียกเส้นนี้เส้นเดียว — PO + GRPO ของบริษัทเดียว
+  // ด่านบริษัทอยู่ใน service (ไฟล์นี้ห้ามมี logic/ห้าม query DB) ดู assertCanSyncCompany
+  .post(
+    '/company/:company/documents',
+    ({ params, currentUser }) =>
+      syncService.syncDocumentsForCompany(params.company, 'BUTTON', currentUser),
+    { params: t.Object({ company: t.String() }) },
+  )
   .use(triggerRoutes);

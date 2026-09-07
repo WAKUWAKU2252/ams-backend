@@ -15,6 +15,7 @@
 //   ห้ามเดาจาก "ช่องไหนไม่ว่าง" เพราะเมล REJECTED มีตารางชิ้นที่ได้เลขแล้วติดไปด้วย
 // ═══════════════════════════════════════════════════════════════════════════
 import { env } from '@config/env';
+import { buildLabelAttachments } from './assetLabelAttachment';
 import { esc, postToFlow, type SendResult } from './shared';
 
 /** URL ของ flow แจ้งผลกลับผู้ขอ — คนละตัวกับ POWER_AUTOMATE_URL ของ flow ขออนุมัติ */
@@ -30,6 +31,13 @@ export interface RegisteredAssetLine {
   location: string;
   /** ผู้ถือครอง — 'ไม่ระบุ (ของกลาง)' เมื่อไม่ได้ผูกกับใคร ไม่ใช่ค่าว่าง (คนละความหมาย) */
   ownerName: string;
+  /**
+   * URL ที่ฝังใน QR ของชิ้นนี้ — ใช้สร้างไฟล์สติกเกอร์แนบท้ายเมล
+   *
+   * ★ ส่งค่าจาก asset.qrCode มาเท่านั้น ห้ามประกอบใหม่จาก assetNumber
+   * ★ null ได้: ชิ้นที่ยังไม่มีค่านี้ในทะเบียนจะถูกข้ามตอนทำสติกเกอร์ (ไม่ใช่พิมพ์ QR เปล่า)
+   */
+  qrCode: string | null;
 }
 
 /** ชิ้นที่บัญชีตีกลับ — ต้องบอกว่าชิ้นไหนและเพราะอะไร ไม่งั้นผู้ขอไม่รู้จะแก้อะไร */
@@ -89,6 +97,13 @@ export async function sendToRequester(notice: RequesterNotice): Promise<SendResu
     envKey: 'POWER_AUTOMATE_REQUESTER_URL',
     subject: notice.kind === 'COMPLETE' ? 'อีเมลแจ้งผลการออกเลข' : 'อีเมลแจ้งรายการที่ต้องแก้ไข',
     body: {
+      // ไฟล์สติกเกอร์ QR แนบท้ายเมล — มีเฉพาะเคส COMPLETE (เคส REJECTED ยังไม่มีเลข
+      // จึงไม่มีอะไรให้พิมพ์) ส่ง [] ไม่ใช่ null เพราะฝั่ง flow เอาไป map ลงช่อง
+      // Attachments ของ Send an email (V2) ตรง ๆ ซึ่งรับ array ว่างได้ แต่ null ไม่ได้
+      attachments:
+        notice.kind === 'COMPLETE'
+          ? await buildLabelAttachments(notice.requestId, notice.registered)
+          : [],
       kind: notice.kind,
       toRequester: notice.toRequester,
       requestId: notice.requestId,

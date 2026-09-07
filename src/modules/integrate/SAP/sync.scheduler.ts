@@ -27,6 +27,18 @@ export function startSyncScheduler(): void {
               console.log(`🔄 sync ${tag}: ${r.rowsHeader} header / ${r.rowsLine} line (${r.mode})`);
             } else if (r.status === 'FAILED') {
               console.error(`❌ sync ${tag}: ${r.error}`);
+            } else {
+              // ── รอบที่ถูกข้าม: ไม่ใช่ error แต่แปลว่า tick นี้ไม่ได้ทำอะไรเลย
+              //
+              // เดิมเงียบสนิท เวลา sync ไม่คืบแล้วมาไล่ดู log จึงเดาไม่ออกว่าเกิดอะไรขึ้น —
+              // เห็นแค่ว่าไม่มีบรรทัดของ entity นั้น ซึ่งหน้าตาเหมือน "scheduler ไม่ทำงาน"
+              //
+              // ★ ไม่ใช่ของที่จะท่วม log: cooldown (30 วิ) สั้นกว่า interval มาก ทางที่เหลือคือ
+              //   "รอบก่อนยังไม่จบ" กับ "มีอีกรอบเขียน state ไปแล้ว" ซึ่งทั้งคู่ควรเห็นจริง ๆ
+              //
+              // ★ ไม่แตะทางปุ่ม — syncOne/syncAllForCompany คืน SKIPPED เป็น response อยู่แล้ว
+              //   คนกดเห็นเหตุผลเต็ม มีแต่ทาง scheduler ที่ไม่มีใครรับผลไปแสดง
+              console.warn(`⏭️  sync ${tag}: ${r.reason}`);
             }
           }
         }

@@ -5,7 +5,7 @@
 // fetch = คุยกับ SAP อย่างเดียว / apply = เขียน ams_db อย่างเดียว
 // แยกกันเพราะ engine เรียก fetch นอกทรานแซกชัน (ดูเหตุผลที่ sync.engine.ts)
 // ═══════════════════════════════════════════════════════════════════════════
-import { eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '@intrastucture/db';
 import {
   purchaseOrder,
@@ -15,7 +15,7 @@ import {
   sapPurchaseOrderSyncEvent,
 } from '@intrastucture/db/schema';
 import { sapQuery, asDateTime } from '@intrastucture/sap/client';
-import { docKey, ownerCodeColumn, lockKeyFor } from '@/modules/integrate/SAP/company.util';
+import { docKey, ownerCodeMap, lockKeyFor } from '@/modules/integrate/SAP/company.util';
 import { poWindow, poByDocEntries, poMinUpdateDate } from '@intrastucture/sap/queries';
 import type { SyncConnector, Tx, PullResult, SyncState, SyncWindow } from '@/modules/integrate/SAP/sync.engine';
 import { emptyResult } from '@/modules/integrate/SAP/sync.engine';
@@ -118,16 +118,54 @@ export async function applyPoRows(tx: Tx, companyCode: string, rows: PoRow[]): P
     ...new Set([...headers.values()].map((r) => r.ownerCode).filter((v): v is number => v != null)),
   ];
   //
-  // ★ ต้องค้นในคอลัมน์ของบริษัทนี้เท่านั้น (0021) — OHEM สองฐานเดินเลขทับกัน 264 ตัว
-  //   ค้นผิดคอลัมน์ = ผูก PO เข้ากับพนักงานอีกบริษัทที่บังเอิญเลขตรงกัน
-  const ownerCol = ownerCodeColumn(companyCode);
+  // ★ ต้องค้นเฉพาะของบริษัทนี้ (0021) — OHEM ของแต่ละฐานเดินเลขอิสระกัน UBA กับ UBP
+  //   ชนกัน 264 ตัว ค้นข้ามบริษัท = ผูก PO เข้ากับพนักงานอีกบริษัทที่บังเอิญเลขตรงกัน
+  //   ownerCodeMap() กรอง companyCode ให้แล้ว (0025 ย้ายจากคอลัมน์ไปเป็นแถวใน employee_company)
   const empIdByOwnerCode = new Map<number, number>();
   for (const part of chunk(ownerCodes, LOOKUP_CHUNK)) {
-    const found = await tx
-      .select({ id: employee.id, ownerCode: ownerCol })
-      .from(employee)
-      .where(inArray(ownerCol, part));
-    for (const e of found) if (e.ownerCode != null) empIdByOwnerCode.set(e.ownerCode, e.id);
+    for (const [code, id] of await ownerCodeMap(tx, companyCode, part)) {
+      empIdByOwnerCode.set(code, id);
+    }
+  }
+
+  // ── ★ ด่านจับ "เลข PO ถูกใช้ซ้ำ" — ต้องดังให้เห็น ห้ามทับเงียบ ๆ
+  //
+  // SAP ยอมให้เปิดใบใหม่ด้วย DocNum เดิมได้ถ้าใบเก่าถูกยกเลิก (ยืนยันกับฝ่ายจัดซื้อ) แต่
+  // ฝั่งเรา poNumber = 'APO-' + DocNum เป็น **PRIMARY KEY** และ upsert ก็ target ที่มัน
+  // สองฉบับที่ DocNum เดียวกันจึงยุบเหลือแถวเดียว ตัวที่ sync ทีหลังชนะ โดยไม่มี error
+  //
+  // ★ ที่แย่กว่าคือบรรทัด: purchase_order_item ใช้คีย์ (poNumber, poLine) ฉบับใหม่จึงทับ
+  //   ทับบรรทัดที่เลขตรงกัน แต่ **บรรทัดของฉบับเก่าที่ฉบับใหม่ไม่มี จะค้างอยู่** กลายเป็น
+  //   ใบเดียวที่มีบรรทัดของสองฉบับปนกัน — ซึ่งไล่หาทีหลังแทบไม่เจอเพราะทุกอย่างดูปกติ
+  //
+  // ยังปล่อยให้ทับต่อโดยตั้งใจ: ฉบับที่ยังไม่ถูกยกเลิกคือความจริงปัจจุบัน การหยุดเขียนจะทำให้
+  // ข้อมูลค้างเก่าแทน ซึ่งแย่กว่า — ด่านนี้จึงทำหน้าที่ "บอกให้รู้" ไม่ใช่ "ห้าม"
+  //
+  // ⚠️ CANCELLED_FILTER ใน queries.ts ตัดฉบับที่ยกเลิกออกตั้งแต่ต้นทางแล้ว โอกาสชนจึงเหลือ
+  //    เฉพาะใบที่ sync เข้ามาตอนยังไม่ยกเลิก แล้วค่อยถูกยกเลิกและเปิดเลขเดิมใหม่ทีหลัง
+  //    (วัด 2026-09-04 บน UBA: ใบยกเลิก 22 ใบ ไม่มีสักใบที่ถูกเปิดเลขซ้ำ — ยังไม่เคยเกิดจริง)
+  const incomingDocEntry = new Map<string, number>();
+  for (const r of headers.values()) incomingDocEntry.set(docKey(r.beginStr, r.docNum), r.docEntry);
+
+  for (const part of chunk([...incomingDocEntry.keys()], LOOKUP_CHUNK)) {
+    const existing = await tx
+      .select({ poNumber: purchaseOrder.poNumber, docEntry: purchaseOrder.docEntry })
+      .from(purchaseOrder)
+      .where(and(eq(purchaseOrder.companyCode, companyCode), inArray(purchaseOrder.poNumber, part)));
+
+    for (const row of existing) {
+      const next = incomingDocEntry.get(row.poNumber);
+      // docEntry เดิมเป็น null ได้ (แถวที่ sync มาก่อนจะมีคอลัมน์นี้) — ไม่ใช่การใช้เลขซ้ำ
+      if (row.docEntry == null || next == null || row.docEntry === next) continue;
+      console.error(
+        `🛑 sync purchase_order:${companyCode}: เลข ${row.poNumber} ถูกใช้ซ้ำใน SAP — ` +
+          `แถวเดิมเป็น DocEntry ${row.docEntry} แต่รอบนี้ได้ DocEntry ${next} ` +
+          `(ใบเก่าน่าจะถูกยกเลิกแล้วเปิดใบใหม่ด้วยเลขเดิม) ` +
+          `ระบบจะเขียนทับด้วยฉบับใหม่ตามปกติ แต่ **บรรทัดของฉบับเก่าที่ฉบับใหม่ไม่มีจะค้างอยู่** ` +
+          `ให้ตรวจด้วย: SELECT * FROM purchase_order_item WHERE "poNumber" = '${row.poNumber}' ` +
+          `แล้วเทียบกับ POR1 ของ DocEntry ${next} ใน SAP`,
+      );
+    }
   }
 
   for (const part of chunk([...headers.values()], INSERT_CHUNK)) {

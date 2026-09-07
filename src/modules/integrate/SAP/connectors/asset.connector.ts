@@ -35,11 +35,37 @@
 // กติกาของแถว SAP_LEGACY: **ข้อมูลที่มาจาก SAP ให้ SAP ดูแล** แก้ที่ SAP เมื่อไหร่
 // รอบ sync ถัดไปต้องตามมาเสมอ ไม่ใช่ค้างค่าเก่าไว้เพราะเคยมีคนแตะที่ฝั่ง AMS
 //
-// คอลัมน์ที่ SAP เป็นเจ้าของ: acquisitionDate/Cost, assetClass, categoryId, departmentId,
+// คอลัมน์ที่ SAP เป็นเจ้าของ: acquisitionDate, sapCreatedDate, assetClass, categoryId, departmentId,
 // employeeId, locationId, uom, serialNumber — ทั้งหมดใช้กติกาเดียวกันคือ
 // "SAP มีค่า → ใช้ของ SAP / SAP ไม่มีค่า → คงของเดิมไว้"
 //
-// ที่ไม่ทับด้วยคือของที่ SAP ไม่มีให้ตั้งแต่แรก: รูป สถานะการใช้งาน ห้องย่อย พิกัดหมุด
+// ── status: SAP เป็นเจ้าของ **แค่แกน Active↔Inactive** ไม่ใช่ทั้งคอลัมน์
+//
+// เดิมอ่าน OITM.validFor มาตั้งตอน INSERT แล้วไม่เคยอัปเดตอีกเลย ผลคือของที่บัญชี
+// ตัดจำหน่ายใน SAP ไปแล้วยังขึ้น Active ใน AMS ตลอดกาล ซึ่งเป็นคำถามหลักของทะเบียน
+// สินทรัพย์พอดี — ตอนนี้ทับให้ตามทุกรอบแล้ว ทั้งแถว SAP_LEGACY และ PO_FLOW
+//
+// ★ **ทับเสมอ ไม่มีเงื่อนไข — SAP เป็นเจ้าของสถานะ 100%**
+//
+//   เดิมทับเฉพาะเมื่อค่าเดิมเป็น 'Active'/'Inactive' เพื่อกันไม่ให้ของที่คนตั้งว่า
+//   "ส่งซ่อมอยู่" เด้งกลับ แต่กติกานั้นแลกมาด้วยประตูหลัง: แถวที่ถือค่าอื่นจะหยุดรับ
+//   ค่าจาก SAP ถาวรโดยไม่มีอะไรฟ้อง
+//
+//   ตัดสินใจแล้วว่าเอาความตรงกับ SAP มาก่อน — สามค่าที่เหลือถูกถอดออกจากทางเดินทุกเส้น
+//   แล้ว (ดู sapStatusRule) ถ้าวันหนึ่งต้องมี "ส่งซ่อม/สูญหาย/ตัดจำหน่าย" จริง
+//   ต้องเป็นคอลัมน์ใหม่แยกต่างหาก ไม่ใช่มาเบียดแกนที่ SAP เป็นเจ้าของ
+//
+// ★ **acquisitionCost ถูกถอดออกจากชุดนี้แล้ว** — เดิมเอา SUM(PCH1.LineTotal) มาใส่ ซึ่งผิด
+//   โดยโครงสร้าง: รหัสสินทรัพย์หนึ่งตัวอยู่บนใบกำกับได้หลายบรรทัด (COM-220-21-004 มี 3
+//   บรรทัด บรรทัดละ 1 ตัว ราคาละ 329,000) การรวมจึงได้ 987,000 ทั้งที่ของชิ้นนั้นราคา
+//   329,000 — วัดแล้วเพี้ยนแบบนี้ 61 แถว หนักสุดต่างจากราคาทุน 941,777
+//
+//   ราคาที่ถูกต้องอยู่ที่ asset_accounting.bookedCost (ITM8.APC ถอยไป ACQ1) อยู่แล้ว
+//   ซึ่งครอบ 3,490 จาก 3,510 แถว = 99.4% ไม่มีเหตุให้เก็บเลขที่สองที่ขัดกันเองอีกช่อง
+//   ตอนนี้ acquisitionCost จึงเป็นของแถว PO_FLOW ล้วน ๆ ตามเจตนาเดิมของคอลัมน์
+//   ("ราคาทุนที่เสนอตอนขอลงทะเบียน" — ดู asset.ts)
+//
+// ที่ไม่ทับด้วยคือของที่ SAP ไม่มีให้ตั้งแต่แรก: รูป ห้องย่อย พิกัดหมุด
 // สองอันหลังเป็นข้อมูลที่เกิดจากการเดินสำรวจ ซึ่ง SAP ไม่มีทางรู้
 //
 // ── QR เป็นข้อยกเว้นที่สาม: AMS ประกอบเอง ไม่ได้มาจาก SAP แต่ทับเสมอ
@@ -63,16 +89,21 @@
 //
 // จึงเปลี่ยนจาก "ข้ามทั้งแถว" เป็น "เขียนเฉพาะคอลัมน์ที่ SAP เป็นเจ้าของจริง":
 //
-//   SAP ชนะบน PO_FLOW : assetClass, categoryId, uom   ← สามตัวนี้เท่านั้น
+//   SAP ชนะบน PO_FLOW : assetClass, categoryId, uom, sapCreatedDate, status ← ห้าตัวนี้เท่านั้น
+//                       (sapCreatedDate เพิ่มมาทีหลัง: เป็นวันที่ SAP สร้างแถว OITM ซึ่ง
+//                        AMS ไม่มีทางรู้เอง และไม่มีใครฝั่ง AMS กรอกทับได้ จึงไม่ชนกับใคร
+//                        status เพิ่มทีหลังเช่นกัน และมีกติกาของตัวเองอยู่ข้างบน — ของที่
+//                        ลงทะเบียนผ่าน AMS แล้วบัญชีตัดจำหน่ายใน SAP ต้องสะท้อนกลับมา
+//                        เหมือนกัน ไม่มีเหตุให้แยกกฎกับแถว SAP_LEGACY)
 //   AMS ชนะเสมอ       : serialNumber, description, locationId, subLocationId, employeeId,
-//                       departmentId, acquisitionCost/Date, รูป, QR, สถานะ, พิกัดหมุด
+//                       departmentId, acquisitionCost/Date, รูป, QR, พิกัดหมุด
 //
 // ★ ห้ามขยายชุดสามคอลัมน์นี้โดยไม่คิดให้จบ โดยเฉพาะ departmentId/employeeId/locationId:
 //   บนแถว PO_FLOW ค่าพวกนี้มาจากผู้ขอ/ผู้อนุมัติในใบคำขอ ซึ่งเป็นความจริงที่ AMS รู้ดีกว่า
 //   SAP — ปลดล็อกเมื่อไหร่ งานที่คนกรอกจะถูกดึงกลับเป็นค่าของ SAP ทุกนาทีที่ scheduler เดิน
 //   (ต่างจาก SAP_LEGACY ที่ SAP เป็นความจริงตั้งต้นของทั้งแถว)
 // ═══════════════════════════════════════════════════════════════════════════
-import { and, eq, inArray, isNotNull, isNull, notInArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, notInArray, sql, type SQL } from 'drizzle-orm';
 import { db } from '@intrastucture/db';
 import {
   asset,
@@ -81,6 +112,7 @@ import {
   category,
   department,
   employee,
+  employeeCompany,
   purchaseOrderItem,
   sapAssetSync,
   sapAssetSyncEvent,
@@ -88,7 +120,7 @@ import {
 } from '@intrastucture/db/schema';
 import { sapQuery } from '@intrastucture/sap/client';
 import { legacyAssetAll, purchasingItemAll } from '@intrastucture/sap/queries';
-import { ownerCodeColumn, lockKeyFor } from '@/modules/integrate/SAP/company.util';
+import { lockKeyFor } from '@/modules/integrate/SAP/company.util';
 import type { SyncConnector, Tx, PullResult, SyncState } from '@/modules/integrate/SAP/sync.engine';
 import { emptyResult } from '@/modules/integrate/SAP/sync.engine';
 import { requireRow } from '@common/db-result';
@@ -115,7 +147,6 @@ export type LegacyAssetRow = {
   acqDate: Date | null;
   vendor: string | null;
   invoiceNo: number | null;
-  acqCost: number | null;
   // ── ชุดบัญชี (ITM8 + ITM7) มาในคิวรีเดียวกัน แล้วแยกลง asset_accounting ทีหลัง
   //    ค่าเหล่านี้ซ้ำเหมือนกันทุกแถวของสินทรัพย์ชิ้นเดียวกัน (ที่ต่างคือฝั่งใบกำกับ)
   //    ทั้งชุดเป็น null พร้อมกันได้ = ชิ้นนั้นยังไม่มียอดบัญชีใน SAP
@@ -196,8 +227,8 @@ type LegacyAsset = {
   employeeCode: number | null;
   status: 'Active' | 'Inactive';
   acquisitionDate: string | null;
-  /** null = ไม่มีใบกำกับสักใบ จึงไม่รู้ราคา — ต่างจาก 0 ที่แปลว่าของฟรี */
-  acquisitionCost: number | null;
+  /** OITM.CreateDate — วันที่ Finance ออกเลขให้ใน SAP (คนละตัวกับวันตั้งหนี้) */
+  sapCreatedDate: string | null;
   /** null = SAP ยังไม่มียอดบัญชีให้ชิ้นนี้ (ไม่มีแถวใน ITM8) */
   accounting: AccountingSnapshot | null;
 };
@@ -243,8 +274,109 @@ function parseAssetClass(raw: string | null): { categoryCode: string | null; dep
   return { categoryCode: toStr(parts[0]), departmentCode: toStr(parts[2]) };
 }
 
+/**
+ * จำนวนแถวที่คำสั่งนั้นแตะจริง — ใช้นับผลหลังใส่ guard (ดู sapLegacyChanged)
+ *
+ * ★ ต้องอ่านจากผลลัพธ์ ไม่ใช่นับจากจำนวนที่ส่งเข้าไป: ตั้งแต่มี guard สองค่านี้ไม่เท่ากันแล้ว
+ *   ส่งไป 2,700 แถวแต่เขียนจริง 3 แถวเป็นเรื่องปกติ
+ *
+ * ทั้งสอง driver คืน rowCount มาให้เหมือนกัน (node-postgres บน production / PGlite ในเทสต์
+ * — วัดแล้วมีทั้ง rowCount และ affectedRows ค่าตรงกัน) แต่ชนิดฝั่ง drizzle ไม่การันตี
+ * จึงอ่านแบบเผื่อไว้แทนการ cast ทิ้ง ค่าที่อ่านไม่ได้นับเป็น 0 ดีกว่ารายงานเกินจริง
+ */
+function rowsAffected(res: unknown): number {
+  const n = (res as { rowCount?: unknown; affectedRows?: unknown } | null)?.rowCount;
+  if (typeof n === 'number') return n;
+  const alt = (res as { affectedRows?: unknown } | null)?.affectedRows;
+  return typeof alt === 'number' ? alt : 0;
+}
+
 /** 0 กับ null มีความหมายเดียวกันสำหรับ FK ฝั่ง SAP — SAP ใช้ 0 แทน "ไม่ได้เลือก" */
 const toRef = (n: number | null): number | null => (n == null || n <= 0 ? null : n);
+
+/**
+ * สถานะที่ SAP มีสิทธิ์เขียน — **SAP ชนะเสมอ ไม่มีเงื่อนไข**
+ *
+ * OITM.validFor พูดได้แค่ 'Active'/'Inactive' และตั้งแต่ถอดสามค่าที่เหลือออกจากทางเดิน
+ * ทุกเส้น (ตัวกรอง / ป้ายบนจอ / union ของ assetInventoryQuery) แกนนี้ก็เหลือสองค่าที่
+ * SAP พูดถึงล้วน ๆ — ทับได้ตรง ๆ ไม่ต้องมีเงื่อนไขอะไรกั้น
+ *
+ * ── เคยเป็น CASE WHEN current IN ('Active','Inactive') THEN incoming ELSE current END
+ *
+ * ★ เงื่อนไขนั้นคือ "ประตูหลัง" ที่ทำให้ข้อมูลหลุดจาก SAP ได้ถาวร: แถวไหนถูกตั้งเป็น
+ *   'Under Maintenance'/'Lost'/'Disposed' ด้วยทางไหนก็ตาม จะหยุดรับค่าจาก SAP ตั้งแต่
+ *   วินาทีนั้นไปตลอดกาล โดยไม่มีอะไรฟ้อง — วัด 2026-09-07: ไม่มีสักแถวที่ใช้สามค่านั้น
+ *   (Active 2,825 / Inactive 721 / อีกสามค่า 0) กติกานี้จึงกันของที่ไม่มีอยู่จริง
+ *   แลกกับความเสี่ยงที่ของจริงจะเพี้ยน
+ *
+ * ★ ตัดสินใจแล้วว่า **SAP เป็นเจ้าของสถานะ 100%** ถ้าวันหนึ่งธุรกิจต้องการ "ส่งซ่อม/
+ *   สูญหาย/ตัดจำหน่าย" จริง ต้องเป็นคอลัมน์ใหม่แยกต่างหาก ห้ามมาเบียดแกนนี้
+ *
+ * ★ ยังคงเป็นฟังก์ชันไว้ (ไม่ inline `incoming` ทิ้ง) เพราะกฎนี้ถูกใช้สี่ที่ที่เขียนคนละภาษา
+ *   — onConflictDoUpdate ของสายที่ 1, UPDATE...FROM VALUES ของสายที่ 2 และ 3, และ
+ *   rowChanged ที่ต้องเป็นนิพจน์เดียวกับใน SET เป๊ะ แก้ที่เดียวแล้วได้ครบทุกที่
+ *
+ * @param incoming ค่าที่ SAP ส่งมารอบนี้ — `excluded."status"` หรือ `v."status"`
+ * @param _current ค่าเดิมในแถว — ไม่ได้ใช้แล้ว คงพารามิเตอร์ไว้เพื่อไม่ต้องแก้ผู้เรียกทั้งสี่ที่
+ */
+const sapStatusRule = (incoming: SQL, _current: SQL): SQL => incoming;
+
+/**
+ * ที่ตั้งที่ SAP ให้มา — "ไม่ระบุ" เดินทางมาถึงในรูปแถวพัก ไม่ใช่ NULL จึงต้องเทียบกับ id ของมัน
+ * (locationId เป็น NOT NULL เขียน COALESCE ตรง ๆ ไม่ได้ — ดูเหตุผลเต็มที่ onConflictDoUpdate)
+ */
+const sapLocationRule = (incoming: SQL, current: SQL, unassignedId: number): SQL =>
+  sql`CASE WHEN ${incoming} = ${unassignedId} THEN ${current} ELSE ${incoming} END`;
+
+/**
+ * แถวนี้จะเปลี่ยนค่าจริงไหม — ใช้ต่อท้าย WHERE ของสายที่ 1–2 เพื่อไม่เขียนทับของที่เหมือนเดิม
+ *
+ * ── ทำไมต้องมี
+ *
+ * pg ใช้ MVCC: UPDATE ที่เขียนค่าเดิมเป๊ะก็ยังสร้าง row version ใหม่ทั้งแถวแล้วทิ้งของเก่า
+ * เป็น dead tuple ไม่มีการเช็คให้ว่า "ค่าเหมือนเดิม ไม่ต้องเขียนก็ได้"
+ *
+ * สายที่ 1–2 เขียนทับ ~2,700 แถวทุกรอบแม้ SAP ไม่ได้แก้อะไรเลย วัดจาก pg_stat_user_tables
+ * (2026-09-04): asset มีของจริง 3,547 แถว แต่ถูก UPDATE ไปแล้ว 30,064 ครั้ง = 8.5 เท่า
+ * ส่วน purchase_order ที่มี guard อยู่แล้วเป็น 217/204 ≈ 1:1
+ *
+ * ผลคือ txMs ของ asset แตะ 3,500 ms ซึ่งเป็นช่วงที่ ams_db ถูกจับล็อกจริง และ
+ * asset.updatedAt ขยับทุกรอบจนตอบไม่ได้ว่า "แถวนี้เปลี่ยนล่าสุดเมื่อไหร่"
+ *
+ * ── กติกาการเขียน
+ *
+ * ★ ทุกบรรทัดต้องเป็น **นิพจน์เดียวกับที่อยู่ใน SET เป๊ะ** ไม่ใช่เขียนย่อเอง — เงื่อนไขที่
+ *   ไม่ตรงกับค่าที่จะเขียนจริงคือแถวที่ควรอัปเดตแล้วไม่ถูกแตะ (หรือกลับกัน)
+ *
+ * ★ ต้องครบทุกคอลัมน์ใน SET ยกเว้น updatedAt — ตกไปช่องเดียว การแก้ที่ SAP ในช่องนั้น
+ *   จะไม่มีวันไหลมาถึง AMS และไม่มีอะไรฟ้อง
+ *
+ * ★ ห้ามใส่ updatedAt: มันคือ now() ซึ่งต่างเสมอ ใส่แล้วทุกแถวผ่าน guard = ไม่มี guard
+ *
+ * ★ ต้องใช้ IS DISTINCT FROM ไม่ใช่ <> — คอลัมน์เกือบทั้งหมด nullable และ `x <> NULL`
+ *   คืน NULL ซึ่งใน WHERE ถือเป็นเท็จ แถวที่ควรเข้าจะหลุดออกเงียบ ๆ
+ *
+ * @param cur  ตัวอ้างค่าปัจจุบันในแถว — คอลัมน์ของ asset (สาย 1) หรือ `a."x"` (สาย 2)
+ * @param inc  ตัวอ้างค่าที่จะเขียน — `excluded."x"` (สาย 1) หรือ `v."x"` (สาย 2)
+ */
+const sapLegacyChanged = (
+  cur: (col: string) => SQL,
+  inc: (col: string) => SQL,
+  unassignedId: number,
+): SQL =>
+  sql`(
+       ${cur('acquisitionDate')} IS DISTINCT FROM ${inc('acquisitionDate')}
+    OR ${cur('sapCreatedDate')}  IS DISTINCT FROM ${inc('sapCreatedDate')}
+    OR ${cur('assetClass')}      IS DISTINCT FROM COALESCE(${inc('assetClass')},   ${cur('assetClass')})
+    OR ${cur('categoryId')}      IS DISTINCT FROM COALESCE(${inc('categoryId')},   ${cur('categoryId')})
+    OR ${cur('departmentId')}    IS DISTINCT FROM COALESCE(${inc('departmentId')}, ${cur('departmentId')})
+    OR ${cur('employeeId')}      IS DISTINCT FROM COALESCE(${inc('employeeId')},   ${cur('employeeId')})
+    OR ${cur('uom')}             IS DISTINCT FROM COALESCE(${inc('uom')},          ${cur('uom')})
+    OR ${cur('serialNumber')}    IS DISTINCT FROM COALESCE(${inc('serialNumber')}, ${cur('serialNumber')})
+    OR ${cur('qrCode')}          IS DISTINCT FROM ${inc('qrCode')}
+    OR ${cur('locationId')}      IS DISTINCT FROM ${sapLocationRule(inc('locationId'), cur('locationId'), unassignedId)}
+    OR ${cur('status')}          IS DISTINCT FROM ${sapStatusRule(inc('status'), cur('status'))}
+  )`;
 
 /**
  * ยุบหลายใบกำกับให้เหลือชิ้นละแถว
@@ -253,13 +385,14 @@ const toRef = (n: number | null): number | null => (n == null || n <= 0 ? null :
  * (เช่น 'เดิน Infrastructure Access Point' ที่ทยอยวางบิลเป็นงวด) มูลค่าที่ลงบัญชีจริง
  * คือยอดรวมทั้งงาน หยิบใบเดียวมาจะได้ราคาต่ำกว่าความจริงแบบเงียบ ๆ
  *
- * วันที่ = ใบแรกสุด เพราะเป็นวันที่ของเริ่มมีตัวตน (ต้นทางของการคิดค่าเสื่อม)
- * ไม่มีใบเลย → ถอยไปใช้ OITM.CreateDate ซึ่งมีครบทุกแถว
+ * วันที่ตั้งหนี้ = ใบแรกสุด / ไม่มีใบกำกับเลย → NULL **ไม่ถอยไปใช้ CreateDate อีกแล้ว**
+ * วันสร้างใน SAP ไปอยู่คอลัมน์ sapCreatedDate ของตัวเอง คอลัมน์เดียวจึงมีความหมายเดียว
+ * (ของเดิมปนกันสองความหมายโดยไม่มีอะไรบอกว่าแถวไหนเป็นอันไหน)
  */
 function collapse(rows: LegacyAssetRow[]): LegacyAsset[] {
   const out = new Map<string, LegacyAsset>();
-  // จำแยกว่าชิ้นนี้เคยเจอใบกำกับจริงหรือยัง — ใช้ตัดสินว่า acquisitionDate ที่ถืออยู่
-  // เป็นวันจากใบกำกับ (ของจริง) หรือเป็น CreateDate ที่ถอยมาใช้ (ของสำรอง)
+  // เหลือไว้เพื่อความชัดเจนของเงื่อนไขข้างล่าง — ตอนนี้ acquisitionDate ที่ไม่ null
+  // แปลว่ามาจากใบกำกับเสมอ (ไม่มีของสำรองให้ปนอีกแล้ว)
   const hasInvoice = new Set<string>();
 
   for (const r of rows) {
@@ -284,8 +417,8 @@ function collapse(rows: LegacyAssetRow[]): LegacyAsset[] {
         sapLocationId: toRef(r.locationCode),
         employeeCode: toRef(r.employeeCode),
         status: r.isActive?.trim().toUpperCase() === 'Y' ? 'Active' : 'Inactive',
-        acquisitionDate: invoiceDate ?? toDateOnly(r.createDate),
-        acquisitionCost: r.acqCost == null ? null : toNum(r.acqCost),
+        acquisitionDate: invoiceDate,
+        sapCreatedDate: toDateOnly(r.createDate),
         // ชุดบัญชีมาจาก LEFT JOIN ITM8/ITM7 จึงเหมือนกันทุกแถวของชิ้นนี้ หยิบจากแถวแรกพอ
         // (หลักเดียวกับ assetClass/uom ข้างบน) — ไม่มี PeriodCat = ยังไม่มียอดใน SAP
         accounting: r.fiscalYear === null ? null : pickAccounting(r),
@@ -296,13 +429,11 @@ function collapse(rows: LegacyAssetRow[]): LegacyAsset[] {
 
     if (!invoiceDate) continue; // แถวไม่มีใบกำกับซ้ำมา — ไม่มีอะไรให้รวมเพิ่ม
 
-    // ใบแรกที่เจอต้องเบียด CreateDate ที่ถอยมาใช้ก่อนหน้าออกไปเสมอ ต่อจากนั้นค่อยเทียบกัน
+    // เก็บใบที่เก่าที่สุดไว้ (แถวแรกอาจยังไม่มีใบกำกับ = null จึงต้องเช็ค null ด้วย)
     if (!hasInvoice.has(key) || prev.acquisitionDate === null || invoiceDate < prev.acquisitionDate) {
       prev.acquisitionDate = invoiceDate;
     }
     hasInvoice.add(key);
-
-    if (r.acqCost != null) prev.acquisitionCost = (prev.acquisitionCost ?? 0) + toNum(r.acqCost);
   }
 
   return [...out.values()];
@@ -389,15 +520,21 @@ const pickAccounting = (r: LegacyAssetRow): AccountingSnapshot => ({
  * ต่างจาก sap_asset_unknown_number ที่เป็น "รายการปัญหา ณ รอบล่าสุด" — ตารางนี้คือ**ข้อมูล**
  * ของหายจาก SAP ไม่ได้แปลว่ามูลค่าที่เคยรู้เป็นโมฆะ ความเก่าดูได้จาก syncedAt/fiscalYear
  */
-async function applyAccounting(tx: Tx, items: LegacyAsset[]): Promise<void> {
+async function applyAccounting(
+  tx: Tx,
+  items: LegacyAsset[],
+  companyCode: string,
+): Promise<void> {
   const withAccounting = items.filter(
     (i): i is LegacyAsset & { accounting: AccountingSnapshot } => i.accounting !== null,
   );
 
   // ── ด่านกัน "ล้มเงียบ": ดึงสินทรัพย์มาได้ แต่ไม่มีข้อมูลบัญชีติดมาเลยสักชิ้น
   //
-  // ฝั่งบัญชีเข้ามาทาง LEFT JOIN จึงพังแบบไม่มี error ได้ — DprArea ถูกเปลี่ยนชื่อหรือเพิ่ม
-  // ชุดใหม่ / ITM8 ถูกล้าง / ปีบัญชีใหม่ยังไม่ถูก post → ทุกแถวได้ fiscalYear = null
+  // ฝั่งบัญชีเข้ามาทาง LEFT JOIN จึงพังแบบไม่มี error ได้ — ITM8 ถูกล้าง / ปีบัญชีใหม่
+  // ยังไม่ถูก post / คิวรีกรองของทิ้งโดยไม่ตั้งใจ → ทุกแถวได้ fiscalYear = null
+  // (เกิดจริงแล้วกับ MIG: โค้ดเคยฝัง DprArea = '01 Posting' ไว้ แต่ฐานนั้นตั้งชื่อสมุดว่า
+  //  'Main Book' — ด่านนี้คือสิ่งเดียวที่ฟ้อง เพราะรอบ sync ขึ้น SUCCESS ตามปกติ)
   // แล้วรอบ sync จะขึ้น SUCCESS สวยงามทั้งที่มูลค่าไม่ได้อัปเดตเลย ต่างจากกรณีคิวรีพัง
   // (สิทธิ์/คอลัมน์หาย/timeout) ที่อย่างน้อยยังล้มดังให้เห็น
   //
@@ -411,8 +548,9 @@ async function applyAccounting(tx: Tx, items: LegacyAsset[]): Promise<void> {
     if (items.length > 0) {
       console.error(
         `🛑 sync asset: ดึงสินทรัพย์มา ${items.length} ชิ้น แต่ไม่มีข้อมูลบัญชีติดมาเลยสักชิ้น — ` +
-          `ปกติต้องมีเกือบทุกชิ้น ให้ไปตรวจว่า ITM8 ยังมีข้อมูลอยู่ไหม และ DprArea ยังเป็น ` +
-          `'01 Posting' หรือเปล่า (ดู legacyAssetAll ที่ intrastucture/sap/queries.ts) — ` +
+          `ปกติต้องมีเกือบทุกชิ้น ให้ไปตรวจว่า ITM8 ยังมีข้อมูลอยู่ไหม ด้วย ` +
+          `SELECT DprArea, PeriodCat, count(*) FROM ITM8 GROUP BY DprArea, PeriodCat ` +
+          `(ดู legacyAssetAll ที่ intrastucture/sap/queries.ts) — ` +
           `ค่าที่เก็บไว้เดิมไม่ถูกแตะ จะค้างเก่าไปจนกว่าจะแก้ต้นทาง`,
       );
     }
@@ -433,10 +571,24 @@ async function applyAccounting(tx: Tx, items: LegacyAsset[]): Promise<void> {
   // items ผ่าน collapse มาแล้ว จึงไม่ซ้ำเลขอยู่แล้ว ไม่ต้อง dedupe ซ้ำ
   const idByNumber = new Map<string, number>();
   for (const part of chunk(withAccounting.map((i) => i.assetNumber), LOOKUP_CHUNK)) {
+    // ★ ต้องกรอง companyCode — เลขสินทรัพย์ unique แค่ระดับ (companyCode, assetNumber)
+    //   ไม่ใช่ทั้งตาราง (uq_asset_company_number) ถ้าไม่กรอง เลขที่ซ้ำข้ามบริษัทจะคืนมา
+    //   หลายแถว แล้ว Map เก็บตัวสุดท้ายที่วนเจอ = ยอดบัญชีของบริษัทนี้ไปทับสินทรัพย์ของ
+    //   อีกบริษัท ส่วนชิ้นที่ถูกต้องไม่ได้แถวเลย และไม่มีอะไรฟ้องสักทาง
+    //
+    //   เกิดจริงแล้ว (วัด 2026-09-02): 41 เลขซ้ำข้ามบริษัท — รอบ sync ของ UBP เขียนยอด
+    //   ทับสินทรัพย์ UBA 41 ชิ้น (syncedAt ของแถวเหล่านั้นเป็นเวลารอบ UBP) ขณะที่ชิ้น UBP
+    //   24 ชิ้นไม่มีข้อมูลบัญชีเลย ทั้งที่ ITM8 ใน SAP มีครบทุกตัว
     const found = await tx
       .select({ id: asset.id, assetNumber: asset.assetNumber })
       .from(asset)
-      .where(and(inArray(asset.assetNumber, part), isNull(asset.deletedAt)));
+      .where(
+        and(
+          eq(asset.companyCode, companyCode),
+          inArray(asset.assetNumber, part),
+          isNull(asset.deletedAt),
+        ),
+      );
     for (const r of found) if (r.assetNumber) idByNumber.set(r.assetNumber, r.id);
   }
 
@@ -594,12 +746,29 @@ export const makeAssetConnector = (
         r.id,
       ]),
     );
+    // ★★ ต้องกรอง companyCode (0026) — รหัสแผนกเป็นผังของแต่ละบริษัท ไม่ใช่เลขที่ไม่ซ้ำ
+    //    ทั้งเครือ: '110' มีอยู่ทั้ง UBA/UBP/MIG คนละแผนกกัน (MIG ชน UBA 32 จาก 33 รหัส)
+    //
+    //    ถ้าไม่กรอง Map จะเก็บตัวสุดท้ายที่ select คืนมาชนะเงียบ ๆ แล้วสินทรัพย์ของบริษัทนี้
+    //    จะถูกผูกเข้าแผนกของอีกบริษัท — ซึ่งตั้งแต่ 0026 fk_asset_department เป็นคีย์คู่
+    //    (departmentId, companyCode) จะปฏิเสธ insert แล้ว **sync ล้มทั้งรอบ** ไม่ใช่แค่
+    //    ข้อมูลเพี้ยน (บั๊กคลาสเดียวกับที่ import/employee.ts เจอตอน 0024)
     const departmentByCode = new Map(
-      (await tx.select({ id: department.id, code: department.departmentId }).from(department))
+      (await tx
+        .select({ id: department.id, code: department.departmentId })
+        .from(department)
+        .where(eq(department.companyCode, companyCode)))
         .filter((r): r is { id: number; code: string } => r.code !== null)
         .map((r) => [r.code, r.id]),
     );
     // ผูกด้วย sapLocationId ไม่ใช่ id — id ของสองระบบบังเอิญตรงกันวันนี้เท่านั้น (ดู master.ts)
+    //
+    // ⚠️ ตารางนี้ยังไม่มี companyCode จึงกรองตามบริษัทไม่ได้ — OLCT ของแต่ละฐานเดินเลข
+    //    อิสระกัน เลขเดียวกันจึงหมายถึงคนละที่ได้ และ uq_asset_location_sap_id เป็น unique
+    //    ระดับทั้งระบบ = เก็บได้แถวเดียวต่อเลข ผลคือของบริษัทที่ import ทีหลังจะถูกวางที่
+    //    สถานที่ของบริษัทแรกแบบเงียบ ๆ (ไม่มี FK จับให้เหมือนแผนก)
+    //    ตอนนี้ยังไม่ระเบิดเพราะมีแต่ที่ตั้งของ UBA และ MIG/UBP ยังไม่ได้ import ที่ตั้ง
+    //    — ต้องเติม companyCode ให้ asset_location ก่อนวันที่จะ import ที่ตั้งของบริษัทอื่น
     const locationBySapId = new Map(
       (await tx
         .select({ id: assetLocation.id, sapId: assetLocation.sapLocationId })
@@ -607,10 +776,14 @@ export const makeAssetConnector = (
         .filter((r): r is { id: number; sapId: number } => r.sapId !== null)
         .map((r) => [r.sapId, r.id]),
     );
-    // ★ คอลัมน์ ownerCode ของบริษัทนี้เท่านั้น (0021) — OHEM สองฐานเลขทับกัน 264 ตัว
-    const ownerCol = ownerCodeColumn(companyCode);
+    // ★ เฉพาะของบริษัทนี้ (0021) — OHEM แต่ละฐานเลขทับกัน 264 ตัว ค้นข้ามบริษัทคือผูกผิดคน
+    //   ต่างจากฝั่ง PO ตรงที่นี่ต้องได้ "ทั้งบริษัท" ไม่ใช่เฉพาะรหัสที่พบในรอบนี้
+    //   (resolve() ถูกเรียกทีละชิ้นจากชุดที่ดึงมา จึงต้องมี Map ครบก่อน)
     const employeeByOwnerCode = new Map(
-      (await tx.select({ id: employee.id, ownerCode: ownerCol }).from(employee))
+      (await tx
+        .select({ id: employeeCompany.employeeId, ownerCode: employeeCompany.ownerCode })
+        .from(employeeCompany)
+        .where(eq(employeeCompany.companyCode, companyCode)))
         .filter((r): r is { id: number; ownerCode: number } => r.ownerCode !== null)
         .map((r) => [r.ownerCode, r.id]),
     );
@@ -678,6 +851,12 @@ export const makeAssetConnector = (
     const toInsert = writable.filter((i) => activeOrigin.get(i.assetNumber) === undefined);
     const toUpdate = writable.filter((i) => activeOrigin.get(i.assetNumber) !== undefined);
 
+    // ── ตัวนับ "แถวที่เขียนจริง" — ตั้งแต่มี guard จำนวนที่ส่งเข้าไปกับที่เขียนได้ไม่เท่ากันแล้ว
+    //    (ส่ง 2,700 แถวแต่เขียนจริง 3 แถวเป็นเรื่องปกติเมื่อ SAP ไม่ได้แก้อะไร)
+    //    สายที่ 1 ไม่ต้องนับจากผลลัพธ์ — ของใหม่ทุกแถวถูกเขียนแน่นอนโดยนิยาม
+    let updatedLegacy = 0;
+    let updatedPoFlow = 0;
+
     for (const part of chunk(toInsert, INSERT_CHUNK)) {
       await tx
         .insert(asset)
@@ -692,7 +871,7 @@ export const makeAssetConnector = (
             // อยู่ในทะเบียนของ SAP แล้ว = ลงทะเบียนเสร็จแล้วโดยนิยาม ไม่ใช่ร่าง
             lifecycle: 'REGISTERED' as const,
             acquisitionDate: i.acquisitionDate,
-            acquisitionCost: i.acquisitionCost,
+            sapCreatedDate: i.sapCreatedDate,
             categoryId: i.categoryId,
             departmentId: i.departmentId,
             employeeId: i.employeeId,
@@ -720,12 +899,14 @@ export const makeAssetConnector = (
           // แก้ conflict ไม่เจอแล้วโยน "no unique or exclusion constraint matching"
           targetWhere: isNull(asset.deletedAt),
           set: {
-            // แตะเฉพาะคอลัมน์ที่ SAP เป็นเจ้าของ — คำอธิบาย/สถานะ/QR/รูป/ห้องย่อย/พิกัดหมุด
+            // แตะเฉพาะคอลัมน์ที่ SAP เป็นเจ้าของ — คำอธิบาย/QR/รูป/ห้องย่อย/พิกัดหมุด
             // เป็นของที่คนกรอกเองหลังจากนี้ ทับเมื่อไหร่คืองานที่หายไปเงียบ ๆ ทุกรอบ sync
             acquisitionDate: sql`excluded."acquisitionDate"`,
-            // COALESCE ไม่ใช่ทับตรง ๆ: สินทรัพย์ที่ยังไม่มีใบกำกับจะส่ง NULL มาทุกรอบ
-            // ถ้าทับ ราคาที่เคยเติมไว้ (จากใบที่ออกทีหลัง หรือคนกรอกเอง) จะหายทันที
-            acquisitionCost: sql`COALESCE(excluded."acquisitionCost", ${asset.acquisitionCost})`,
+            // ทับเสมอเหมือน acquisitionDate — OITM.CreateDate มีครบทุกแถวและไม่เคยเป็น
+            // ค่าที่คนกรอก การ COALESCE จึงไม่มีอะไรให้ปกป้อง
+            sapCreatedDate: sql`excluded."sapCreatedDate"`,
+            // validFor ของ SAP ชนะเฉพาะบนแกน Active↔Inactive — ดู sapStatusRule
+            status: sapStatusRule(sql`excluded."status"`, sql`${asset.status}`),
 
             // ── ชุดที่มาจาก OITM (0011) — SAP เป็นเจ้าของ แก้ที่ SAP แล้วไหลมาเองทุกรอบ
             //
@@ -763,7 +944,17 @@ export const makeAssetConnector = (
           },
           // ตาข่ายชั้นสอง: กันแถว PO_FLOW ที่แทรกเข้ามาระหว่างที่เราสำรวจกับตอนเขียน
           // (การสำรวจข้างบนกันได้แค่สิ่งที่มีอยู่ ณ ตอนอ่าน)
-          setWhere: eq(asset.origin, 'SAP_LEGACY'),
+          // ★ guard เดียวกับสายที่ 2 — สองที่นี้คือกฎเดียวกันเขียนคนละภาษา ต้องแก้คู่กันเสมอ
+          //   (สายนี้เจอ conflict เฉพาะตอน race จึงแทบไม่ยิงจริง แต่ถ้าปล่อยให้ต่างกัน
+          //    ผลของการ sync จะขึ้นกับว่าแถวนั้นมาทางไหน ซึ่งไล่หาทีหลังแทบไม่เจอ)
+          setWhere: and(
+            eq(asset.origin, 'SAP_LEGACY'),
+            sapLegacyChanged(
+              (c) => sql.raw(`"asset"."${c}"`),
+              (c) => sql.raw(`excluded."${c}"`),
+              location.id,
+            ),
+          ),
         });
     }
 
@@ -779,17 +970,18 @@ export const makeAssetConnector = (
     for (const part of chunk(toUpdate, INSERT_CHUNK)) {
       const rows = part.map(
         (i) => sql`(${i.assetNumber}::varchar, ${i.acquisitionDate}::date,
-                    ${i.acquisitionCost}::numeric, ${i.assetClass}::varchar,
+                    ${i.sapCreatedDate}::date, ${i.assetClass}::varchar,
                     ${i.categoryId}::integer, ${i.departmentId}::integer,
                     ${i.employeeId}::integer, ${i.uom}::varchar,
                     ${i.serialNumber}::varchar, ${i.locationId ?? location.id}::integer,
-                    ${assetQrUrl(companyCode, i.assetNumber)}::varchar)`,
+                    ${assetQrUrl(companyCode, i.assetNumber)}::varchar,
+                    ${i.status}::asset_status)`,
       );
 
-      await tx.execute(sql`
+      const res = await tx.execute(sql`
         UPDATE ${asset} AS a SET
           "acquisitionDate" = v."acquisitionDate",
-          "acquisitionCost" = COALESCE(v."acquisitionCost", a."acquisitionCost"),
+          "sapCreatedDate"  = v."sapCreatedDate",
           "assetClass"      = COALESCE(v."assetClass", a."assetClass"),
           "categoryId"      = COALESCE(v."categoryId", a."categoryId"),
           "departmentId"    = COALESCE(v."departmentId", a."departmentId"),
@@ -800,10 +992,13 @@ export const makeAssetConnector = (
           "qrCode"          = v."qrCode",
           "locationId"      = CASE WHEN v."locationId" = ${location.id}
                                    THEN a."locationId" ELSE v."locationId" END,
+          -- validFor ของ SAP ชนะเฉพาะบนแกน Active↔Inactive — ดู sapStatusRule
+          "status"          = ${sapStatusRule(sql`v."status"`, sql`a."status"`)},
           "updatedAt"       = now()
         FROM (VALUES ${sql.join(rows, sql`, `)}) AS v(
-          "assetNumber", "acquisitionDate", "acquisitionCost", "assetClass", "categoryId",
-          "departmentId", "employeeId", "uom", "serialNumber", "locationId", "qrCode"
+          "assetNumber", "acquisitionDate", "sapCreatedDate", "assetClass", "categoryId",
+          "departmentId", "employeeId", "uom", "serialNumber", "locationId", "qrCode",
+          "status"
         )
         WHERE a."assetNumber" = v."assetNumber"
           -- ★ ต้องมีบริษัทด้วย ไม่งั้นรอบ sync ของ UBA จะไปแก้แถวของ UBP ที่เลขตรงกัน
@@ -811,13 +1006,28 @@ export const makeAssetConnector = (
           AND a."deletedAt" IS NULL
           -- เงื่อนไขเดียวกับ setWhere ข้างบน: ของที่ลงทะเบียนผ่าน AMS แล้ว SAP ไม่ใช่เจ้าของ
           AND a.origin = 'SAP_LEGACY'
+          -- ★ แตะเฉพาะแถวที่ค่าจะเปลี่ยนจริง — ดู sapLegacyChanged
+          AND ${sapLegacyChanged(
+            (c) => sql.raw(`a."${c}"`),
+            (c) => sql.raw(`v."${c}"`),
+            location.id,
+          )}
       `);
+      updatedLegacy += rowsAffected(res);
     }
 
-    // ── สายที่สาม: แถว PO_FLOW เติมเฉพาะ assetClass / categoryId / uom
+    // ── สายที่สาม: แถว PO_FLOW เติมเฉพาะ assetClass / categoryId / uom / sapCreatedDate / status
     //
     // ★ สายนี้ **ไม่ใช่** ฝาแฝดของสองสายข้างบน อย่าไล่ให้ชุดคอลัมน์ตรงกัน — สองสายบนคือ
-    //   "SAP เป็นเจ้าของทั้งแถว" ส่วนสายนี้คือ "SAP เป็นเจ้าของสามช่อง" คนละกฎกันโดยตั้งใจ
+    //   "SAP เป็นเจ้าของทั้งแถว" ส่วนสายนี้คือ "SAP เป็นเจ้าของห้าช่อง" คนละกฎกันโดยตั้งใจ
+    //
+    // ★ status เข้าชุดนี้เพราะการตัดจำหน่ายในบัญชีไม่ได้แยกว่าของชิ้นนั้นเข้าระบบมาทางไหน
+    //   ใช้ sapStatusRule ตัวเดียวกับสองสายบน (ทับเฉพาะแกน Active↔Inactive) จึงไม่ไปล้าง
+    //   สถานะที่คนตั้งเอง — เป็นข้อยกเว้นเดียวของประโยค "อย่าไล่ให้ชุดคอลัมน์ตรงกัน"
+    //
+    // ★ sapCreatedDate เข้าชุดนี้ได้เพราะเป็นวันที่ SAP สร้างแถว OITM ล้วน ๆ ซึ่ง AMS
+    //   ไม่มีทางรู้เองและไม่มีช่องให้ใครกรอกทับ — ต่างจาก departmentId/employeeId/
+    //   locationId ที่บนแถว PO_FLOW มาจากใบคำขอ ซึ่ง AMS รู้ดีกว่า SAP (ห้ามเติมเข้าชุดนี้)
     //   (กฎที่ต้องตรงกันเป๊ะคือคู่ onConflictDoUpdate ↔ UPDATE...FROM VALUES ของ SAP_LEGACY)
     //
     // COALESCE เหมือนสายอื่น: SAP มีค่า → ทับ / SAP ว่าง → คงของเดิม (คนกรอกเองไว้ก็ไม่หาย)
@@ -830,17 +1040,20 @@ export const makeAssetConnector = (
     for (const part of chunk(enrichable, INSERT_CHUNK)) {
       const rows = part.map(
         (i) => sql`(${i.assetNumber}::varchar, ${i.assetClass}::varchar,
-                    ${i.categoryId}::integer, ${i.uom}::varchar)`,
+                    ${i.categoryId}::integer, ${i.uom}::varchar,
+                    ${i.sapCreatedDate}::date, ${i.status}::asset_status)`,
       );
 
-      await tx.execute(sql`
+      const res = await tx.execute(sql`
         UPDATE ${asset} AS a SET
           "assetClass" = COALESCE(v."assetClass", a."assetClass"),
           "categoryId" = COALESCE(v."categoryId", a."categoryId"),
           "uom"        = COALESCE(v."uom", a."uom"),
+          "sapCreatedDate" = COALESCE(v."sapCreatedDate", a."sapCreatedDate"),
+          "status"     = ${sapStatusRule(sql`v."status"`, sql`a."status"`)},
           "updatedAt"  = now()
         FROM (VALUES ${sql.join(rows, sql`, `)}) AS v(
-          "assetNumber", "assetClass", "categoryId", "uom"
+          "assetNumber", "assetClass", "categoryId", "uom", "sapCreatedDate", "status"
         )
         WHERE a."assetNumber" = v."assetNumber"
           -- ★ ต้องมีบริษัทด้วย ไม่งั้นรอบ sync ของ UBA จะไปแก้แถวของ UBP ที่เลขตรงกัน
@@ -852,8 +1065,13 @@ export const makeAssetConnector = (
                 a."assetClass" IS DISTINCT FROM COALESCE(v."assetClass", a."assetClass")
              OR a."categoryId" IS DISTINCT FROM COALESCE(v."categoryId", a."categoryId")
              OR a."uom"        IS DISTINCT FROM COALESCE(v."uom",        a."uom")
+             OR a."sapCreatedDate" IS DISTINCT FROM COALESCE(v."sapCreatedDate", a."sapCreatedDate")
+             -- ต้องเป็นนิพจน์เดียวกับฝั่ง SET เป๊ะ (เรียก sapStatusRule ตัวเดิม) ไม่ใช่เขียนย่อ
+             -- เอง — เงื่อนไขที่ไม่ตรงกับค่าที่จะเขียนจริงคือแถวที่ควรอัปเดตแล้วไม่ถูกแตะ
+             OR a."status" IS DISTINCT FROM ${sapStatusRule(sql`v."status"`, sql`a."status"`)}
           )
       `);
+      updatedPoFlow += rowsAffected(res);
     }
 
     // ── สายที่สี่: ชิ้นที่ยังไม่มีเลขสินทรัพย์ — เติมจาก "รหัสจัดซื้อ" บนบรรทัด PO แทน
@@ -904,6 +1122,13 @@ export const makeAssetConnector = (
         ), ${purchaseOrderItem} AS pi
         WHERE pi."id" = a."poItemId"
           AND pi."itemCode" = v."itemCode"
+          -- ★ ต้องมีบริษัทด้วยเหมือนสองสายบน — v มาจาก OITM ของบริษัทนี้บริษัทเดียว
+          --   ส่วน purchase_order_item.itemCode เป็นรหัสดิบไม่มี prefix บริษัทติดมา
+          --   (ต่างจาก poNumber) และรหัสจัดซื้อคือรหัสบัญชีที่ทั้งเครือใช้ผังเดียวกัน
+          --   ไม่กรองแล้วรอบ sync ของ UBA จะเติมค่าจาก OITM ของ UBA ลงแถว PO_FLOW
+          --   ของ UBP ที่ itemCode ตรงกัน — เบากว่าสายบนเพราะเติมเฉพาะช่องว่าง
+          --   (COALESCE กลับข้าง ไม่ทับของเดิม) แต่ก็ยังเป็นค่าของผิดบริษัทแบบไม่มีอะไรฟ้อง
+          AND a."companyCode" = ${companyCode}
           AND a.origin = 'PO_FLOW'
           AND a."deletedAt" IS NULL
           -- แตะเฉพาะแถวที่ได้อะไรเพิ่มจริง ๆ (เหตุผลเดียวกับ IS DISTINCT FROM ของสายบน)
@@ -919,12 +1144,20 @@ export const makeAssetConnector = (
     // แล้วดูว่าตัวไหนไม่มีคู่ ซึ่งเป็นอาการของปัญหาจริงเสมอ (พิมพ์เลขผิด หรือของชิ้นนั้น
     // ยังไม่ถูกลงทะเบียนใน SAP) และเดิมไม่มีอะไรบอกเลยสักทาง
     const sapNumbers = new Set(items.map((i) => i.assetNumber));
+    // ★ กรอง companyCode ด้วย — sapNumbers เป็นเลขจาก SAP ของบริษัทนี้บริษัทเดียว
+    //   ถ้าสำรวจข้ามบริษัท ของบริษัทอื่นจะถูกตัดสินว่า "SAP ไม่รู้จัก" ทุกชิ้น ทั้งที่แค่
+    //   ไปถามผิดฐาน แล้วรายงานจะพลิกไปมาตามว่าบริษัทไหน sync ทีหลัง
     const numbered = await tx
       .select({ id: asset.id, assetNumber: asset.assetNumber, poNumber: purchaseOrderItem.poNumber })
       .from(asset)
       .leftJoin(purchaseOrderItem, eq(purchaseOrderItem.id, asset.poItemId))
       .where(
-        and(eq(asset.origin, 'PO_FLOW'), isNotNull(asset.assetNumber), isNull(asset.deletedAt)),
+        and(
+          eq(asset.companyCode, companyCode),
+          eq(asset.origin, 'PO_FLOW'),
+          isNotNull(asset.assetNumber),
+          isNull(asset.deletedAt),
+        ),
       );
 
     const unknown = numbered.filter((r) => !sapNumbers.has(r.assetNumber!));
@@ -938,13 +1171,20 @@ export const makeAssetConnector = (
     //
     // นิยามที่ถูกคือ "ตารางนี้ = ชุดของที่หาไม่เจอ ณ รอบล่าสุด" ลบส่วนเกินทิ้งจึงตรงกว่า
     // และไม่ต้องไล่แจกแจงว่าหลุดออกไปด้วยเหตุใด — ตารางเล็กมาก (หลักสิบ) สแกนทั้งตารางไม่แพง
+    // ★ ขอบเขตการล้างต้องเป็น "บริษัทนี้" ไม่ใช่ทั้งตาราง — ตารางไม่มีคอลัมน์ companyCode
+    //   จึงต้องวงไว้ผ่าน asset ไม่งั้นรอบ sync ของบริษัทหนึ่งจะลบรายงานของบริษัทอื่นทิ้ง
+    //   ทุกครั้ง (คู่กับตัวกรองข้างบน — แก้ทีละจุดไม่พอ ต้องแก้พร้อมกัน)
     const unknownIds = unknown.map((r) => r.id);
+    const ownScope = inArray(
+      sapAssetUnknownNumber.assetId,
+      tx.select({ id: asset.id }).from(asset).where(eq(asset.companyCode, companyCode)),
+    );
     await tx
       .delete(sapAssetUnknownNumber)
       .where(
         unknownIds.length > 0
-          ? notInArray(sapAssetUnknownNumber.assetId, unknownIds)
-          : sql`true`,
+          ? and(ownScope, notInArray(sapAssetUnknownNumber.assetId, unknownIds))
+          : ownScope,
       );
 
     for (const part of chunk(unknown, INSERT_CHUNK)) {
@@ -974,11 +1214,16 @@ export const makeAssetConnector = (
     // asset_accounting.assetId เป็น FK ไปที่ asset แถวสินทรัพย์ที่เพิ่งถูกสร้างข้างบนจึงต้อง
     // มีอยู่แล้วก่อนถึงบรรทัดนี้ (อยู่ในทรานแซกชันเดียวกัน มองเห็นกันได้) ถ้าย้ายขึ้นไปข้างบน
     // ของใหม่ทุกชิ้นจะเขียนมูลค่าไม่ได้ในรอบแรกที่มันเข้าระบบ
-    await applyAccounting(tx, items);
+    await applyAccounting(tx, items, companyCode);
 
     return {
-      // นับรวมแถว PO_FLOW ที่เติมสามคอลัมน์ด้วย — มันคือแถวที่ sync รอบนี้แตะจริง ๆ
-      rowsHeader: writable.length + enrichable.length,
+      // ★ นับ "แถวที่เขียนจริง" ไม่ใช่ "แถวที่ส่งไปให้พิจารณา" — ตั้งแต่ใส่ guard สองค่านี้
+      //   ต่างกันมาก (ส่ง 2,700 เขียนจริง 3) ถ้ายังนับแบบเดิม ตัวเลขบนหน้าจอจะบอกว่า
+      //   sync แตะ 2,700 แถวทุกรอบตลอดไป ซึ่งเป็นภาพที่ตรงข้ามกับความจริงหลังแก้
+      //
+      //   toInsert ไม่ต้องอ่านจากผลลัพธ์ — ของใหม่ทุกแถวถูกเขียนแน่นอนโดยนิยาม
+      //   (onConflictDoUpdate ที่ห้อยอยู่เป็นตาข่ายกัน race เท่านั้น)
+      rowsHeader: toInsert.length + updatedLegacy + updatedPoFlow,
       rowsLine: created,
       // เหลือความหมายเดียว: แถวที่ไม่ได้แตะเลย (เลขนั้นถูก soft delete ไปแล้ว)
       // เดิมตัวเลขนี้รวมแถว PO_FLOW ที่ข้ามทั้งแถวไว้ด้วย ซึ่งไม่มีอีกแล้ว

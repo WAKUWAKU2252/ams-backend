@@ -1,78 +1,67 @@
 // ท่อบาง ๆ: แกะ request -> เรียก service -> ส่งกลับ (ห้าม logic/ประกอบการ์ด/ยิง fetch เอง)
 // การประกอบการ์ด+อีเมลและการยิงเข้า Power Automate ย้ายไปอยู่ที่ sendToManager.ts แล้ว
 //
-// ⚠️ POST /request-approval เหลือไว้เพื่อความเข้ากันได้เท่านั้น — เส้นทางปกติของการแจ้ง
-// ขออนุมัติย้ายไปอยู่ใน submitRequest ฝั่ง backend แล้ว (1 call = เปลี่ยนสถานะ + แจ้ง +
-// บันทึกผลลง notifiedAt/notifyError) การให้ frontend ยิงเป็นขั้นที่สองทำให้ขาดกลางคันได้
-// แล้วใบค้าง PENDING_APPROVAL โดยไม่มีใครรู้และหาไม่เจอ
+// module นี้เหลือเส้นเดียว: webhook รับผลอนุมัติกลับจาก Power Automate
+//
+// ── เคยมี POST /request-approval ให้ frontend สั่งส่งการ์ดเอง — ถอดออกแล้ว ───────
+//
+// การแจ้งขออนุมัติย้ายไปอยู่ใน submitRequest ฝั่ง backend (1 call = เปลี่ยนสถานะ + แจ้ง +
+// บันทึกผลลง notifiedAt/notifyError) การให้ frontend ยิงเป็นขั้นที่สองทำให้ขาดกลางคันได้:
+// ปิดเบราว์เซอร์ระหว่างสองขั้นแล้วใบค้าง PENDING_APPROVAL โดยไม่มีใครได้รับแจ้ง และส่งซ้ำ
+// ไม่ได้เพราะสถานะเปลี่ยนไปแล้ว
+//
+// ★ ถอดทิ้งไม่ใช่แค่เลิกเรียก — เส้นนั้นไม่มี auth ใครยิงเข้ามาก็สั่งส่งการ์ด/อีเมลเข้า
+//   Teams ของหัวหน้าได้ไม่จำกัด ตัวฟังก์ชัน sendApprovalRequest() ยังอยู่และถูกเรียกจาก
+//   asset-request.service ตามปกติ — ที่หายไปคือทางเข้าจากภายนอกเท่านั้น
 import { Elysia, t } from 'elysia';
+import { env } from '@config/env';
+import { ServiceUnavailableError, UnauthorizedError } from '@common/errors';
 import * as teamsService from './teams.service';
-import { sendApprovalRequest } from './sendToManager';
+
+/**
+ * ยืนยันว่าคำขอมาจาก Power Automate จริง — ตัวเดียวที่กัน POST /teams/webhook อยู่
+ *
+ * เส้นนั้นเปลี่ยนสถานะใบคำขอได้โดยไม่มี JWT (Power Automate ไม่มี token ของเรา) และต้อง
+ * เปิดออกอินเทอร์เน็ตให้ flow ยิงเข้ามาได้ ถ้าไม่มีด่านนี้ ใครที่รู้ URL ก็ยิง curl
+ * บรรทัดเดียวอนุมัติใบแทนหัวหน้าได้
+ *
+ * ★ ไม่ตั้ง secret = 503 ไม่ใช่ปล่อยผ่าน — ลืมตั้งบน production แล้ว fail open คือ
+ *   ช่องโหว่ที่เงียบสนิท ส่วน fail closed จะเห็นทันทีว่าการ์ดกดแล้วไม่มีอะไรเกิดขึ้น
+ *
+ * ★ เทียบแบบ timing-safe: เทียบด้วย === จะคืนเร็ว/ช้าต่างกันตามจำนวนตัวอักษรที่ตรง
+ *   ซึ่งเดาทีละตัวได้ในทางทฤษฎี — ค่านี้อยู่หน้าอินเทอร์เน็ต ใช้ของที่ถูกต้องไปเลย
+ *   (ความยาวไม่เท่ากัน timingSafeEqual จะโยน จึงต้องเช็คก่อน ซึ่งไม่รั่วอะไรเพิ่ม
+ *    เพราะความยาวของ secret ไม่ใช่ความลับ)
+ */
+function assertWebhookSecret(provided: string | undefined): void {
+  const expected = env.TEAMS_WEBHOOK_SECRET;
+  if (!expected) {
+    throw new ServiceUnavailableError(
+      'ยังไม่ได้ตั้ง TEAMS_WEBHOOK_SECRET — เส้นรับผลอนุมัติถูกปิดไว้จนกว่าจะตั้งค่า',
+    );
+  }
+
+  const a = Buffer.from(provided ?? '');
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    throw new UnauthorizedError('X-Teams-Webhook-Secret ไม่ถูกต้อง');
+  }
+}
 
 export const teamsRoutes = new Elysia({
   prefix: '/teams',
 })
 
-  .post(
-    '/request-approval',
-    async ({ body, set }) => {
-      const result = await sendApprovalRequest({
-        ...body,
-        requestByEmail: body.requestByEmail?.trim() || null,
-        previousRejection: null,
-      });
-      set.status = result.status;
-      return { success: result.ok, message: result.message, error: result.error };
-    },
-    {
-      body: t.Object({
-        requestId: t.Number(),
-        managerId: t.Number(),
-        // ชื่อว่างได้ (employee.firstName/lastName เป็น nullable) — ไม่มีชื่อยังส่งอีเมลได้
-        managerName: t.String(),
-        // ต่างจากช่องอื่น: minLength 1 เพราะเป็นปลายทางจริงที่ Power Automate ใช้ส่ง
-        // ว่างแล้วปล่อยผ่าน = flow ล้มที่ปลายทางโดยฝั่งเราขึ้นว่าส่งสำเร็จ (บั๊กเดิม)
-        managerEmail: t.String({ minLength: 1, maxLength: 100 }),
-        ownerPrName: t.String(),
-        requestBy: t.String(),
-        // optional: เส้นทางปกติ (submitRequest) อ่านจาก employee.email ให้เองอยู่แล้ว
-        requestByEmail: t.Optional(t.String({ maxLength: 100 })),
-        poNumber: t.String(),
-        vendorName: t.String(),
-        poDate: t.String(),
-        grpo: t.Array(
-          t.Object({
-            grpoNumber: t.String(),
-            item: t.Array(
-              t.Object({
-                poLine: t.String(),
-                description: t.String(),
-                quantity: t.Number(),
-                serialItems: t.Array(
-                  t.Object({
-                    serialNumber: t.String(),
-                    pricePerUnit: t.Number(),
-                    // 📍 location ย้ายลงมาระดับชิ้น — ประกอบ "ที่ตั้ง - ตำแหน่งย่อย" มาจาก frontend
-                    location: t.String(),
-                  })
-                ),
-              })
-            ),
-          })
-        ),
-      }),
-    }
-  )
-
-  // ⚠️ endpoint นี้ยังไม่มีการยืนยันตัวตน (ตั้งใจเลื่อนไว้ — ดู TODO ข้างล่าง)
-  // ต่างจาก route อื่นทั้งระบบที่ผ่าน authGuard เพราะ Power Automate ไม่มี JWT ของเรา
-  //
-  // TODO ก่อนขึ้น production: ใส่ shared secret (เช่น header X-Teams-Webhook-Secret
-  // เทียบกับ env ใหม่) — ตอนนี้ใครรู้ URL ก็เปลี่ยนสถานะใบไหนก็ได้ด้วย curl บรรทัดเดียว
-  // และ URL ที่ใช้อยู่เป็น ngrok สาธารณะ
+  // ไม่ผ่าน authGuard เหมือน route อื่นทั้งระบบ เพราะ Power Automate ไม่มี JWT ของเรา
+  // — ตัวยืนยันตัวตนของเส้นนี้คือ shared secret ใน header X-Teams-Webhook-Secret
+  // (ดู assertWebhookSecret ข้างบน) ต้องตั้ง TEAMS_WEBHOOK_SECRET ทั้งฝั่ง .env และในตัว flow
   .post(
     '/webhook',
-    async ({ body, set }) => {
+    async ({ body, set, headers }) => {
+      // ★ ต้องเช็คก่อนแตะอะไรทั้งสิ้น รวมถึงก่อน log — ไม่งั้น log จะเต็มไปด้วยของปลอม
+      //   ที่คนยิงมั่วส่งมา แล้วแยกไม่ออกว่าอันไหนคือการอนุมัติจริง
+      assertWebhookSecret(headers['x-teams-webhook-secret']);
+
       console.log('\n========================================');
       console.log('📥 ได้รับผลการอนุมัติจาก Teams');
       console.log('========================================');
