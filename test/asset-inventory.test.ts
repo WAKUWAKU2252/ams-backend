@@ -9,11 +9,19 @@
 //    และลำดับต้องคงที่ข้ามหน้า ไม่งั้นผู้ใช้จะเห็นชิ้นเดิมซ้ำในหน้าถัดไปและมีบางชิ้นหายไป
 //
 // 3. **ค้นแล้วต้องเจอจากสิ่งที่คนจำได้จริง** — เลขทะเบียน / ชื่อของ / เลขเครื่อง
+import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, test } from 'bun:test';
 import { db } from '@intrastucture/db';
 import { asset, assetAccounting } from '@intrastucture/db/schema';
 import * as assetService from '@modules/business/asset/asset.service';
-import { makeDepartment, makeEmployee, makeLocation, resetDb, TEST_COMPANY } from './helpers/factory';
+import {
+  makeDepartment,
+  makeEmployee,
+  makeLocation,
+  makeSubLocation,
+  resetDb,
+  TEST_COMPANY,
+} from './helpers/factory';
 
 let locationId = 0;
 
@@ -29,6 +37,8 @@ async function makeAsset(opts: {
   companyCode?: string;
   /** ไม่ระบุ = สถานที่กลางที่สร้างไว้ใน beforeEach */
   locationId?: number;
+  /** วันที่ลงทะเบียนใน SAP (OITM.CreateDate) — null = ยังไม่มีแถวใน OITM */
+  sapCreatedDate?: string | null;
   status?: 'Active' | 'Inactive' | 'Under Maintenance' | 'Lost' | 'Disposed';
 }): Promise<number> {
   const [row] = await db
@@ -44,6 +54,7 @@ async function makeAsset(opts: {
       employeeId: opts.employeeId ?? null,
       lifecycle: opts.lifecycle ?? 'REGISTERED',
       status: opts.status ?? 'Active',
+      sapCreatedDate: opts.sapCreatedDate ?? null,
       deletedAt: opts.deleted ? new Date().toISOString() : null,
     })
     .returning();
@@ -179,6 +190,122 @@ describe('กรองตามแผนก', () => {
 
     expect(res.total).toBe(1);
     expect(res.data[0]!.assetNumber).toBe('A-001');
+  });
+});
+
+describe('การเรียงลำดับ', () => {
+  test('ไม่ส่ง sort — เรียงตามเลขสินทรัพย์เหมือนเดิม', async () => {
+    await makeAsset({ assetNumber: 'C-003' });
+    await makeAsset({ assetNumber: 'A-001' });
+    await makeAsset({ assetNumber: 'B-002' });
+
+    const res = await list();
+
+    expect(res.data.map((r) => r.assetNumber)).toEqual(['A-001', 'B-002', 'C-003']);
+  });
+
+  test('เรียงตามวันที่ลงทะเบียน — ใหม่สุดขึ้นก่อน', async () => {
+    await makeAsset({ assetNumber: 'A-001', sapCreatedDate: '2020-01-01' });
+    await makeAsset({ assetNumber: 'A-002', sapCreatedDate: '2026-08-31' });
+    await makeAsset({ assetNumber: 'A-003', sapCreatedDate: '2017-04-04' });
+
+    const res = await list({ sort: 'registered' });
+
+    expect(res.data.map((r) => r.assetNumber)).toEqual(['A-002', 'A-001', 'A-003']);
+  });
+
+  test('ชิ้นที่ยังไม่มีวันลงทะเบียนไปอยู่ท้ายสุด ไม่ใช่ขึ้นหัว', async () => {
+    await makeAsset({ assetNumber: 'A-001', sapCreatedDate: null });
+    await makeAsset({ assetNumber: 'A-002', sapCreatedDate: '2020-01-01' });
+
+    const res = await list({ sort: 'registered' });
+
+    expect(res.data.map((r) => r.assetNumber)).toEqual(['A-002', 'A-001']);
+  });
+
+  test('เรียงตามมูลค่าคงเหลือ — มากสุดขึ้นก่อน และชิ้นที่คำนวณไม่ได้ไปท้าย', async () => {
+    const cheap = await makeAsset({ assetNumber: 'A-001' });
+    const rich = await makeAsset({ assetNumber: 'A-002' });
+    await makeAsset({ assetNumber: 'A-003' }); // ไม่มีแถวบัญชี = คำนวณ NBV ไม่ได้
+    await makeAccounting(cheap, { bookedCost: 1000, accumulatedDepreciation: 900 }); // 100
+    await makeAccounting(rich, { bookedCost: 5000, accumulatedDepreciation: 1000 }); // 4000
+
+    const res = await list({ sort: 'netBookValue' });
+
+    expect(res.data.map((r) => r.assetNumber)).toEqual(['A-002', 'A-001', 'A-003']);
+  });
+
+  test('เรียงตามปีบัญชี — ปีใหม่สุดขึ้นก่อน', async () => {
+    const old = await makeAsset({ assetNumber: 'A-001' });
+    const recent = await makeAsset({ assetNumber: 'A-002' });
+    await makeAccounting(old, { fiscalYear: 2022 });
+    await makeAccounting(recent, { fiscalYear: 2026 });
+
+    const res = await list({ sort: 'fiscalYear' });
+
+    expect(res.data.map((r) => r.assetNumber)).toEqual(['A-002', 'A-001']);
+  });
+
+  test('สลับทิศเป็นน้อยไปมาก — เก่าสุดขึ้นก่อน', async () => {
+    await makeAsset({ assetNumber: 'A-001', sapCreatedDate: '2020-01-01' });
+    await makeAsset({ assetNumber: 'A-002', sapCreatedDate: '2026-08-31' });
+    await makeAsset({ assetNumber: 'A-003', sapCreatedDate: '2017-04-04' });
+
+    const res = await list({ sort: 'registered', sortDir: 'asc' });
+
+    expect(res.data.map((r) => r.assetNumber)).toEqual(['A-003', 'A-001', 'A-002']);
+  });
+
+  test('สลับทิศแล้ว NULL ยังอยู่ท้ายสุด ไม่ใช่ขึ้นหัว', async () => {
+    await makeAsset({ assetNumber: 'A-001', sapCreatedDate: null });
+    await makeAsset({ assetNumber: 'A-002', sapCreatedDate: '2020-01-01' });
+
+    const res = await list({ sort: 'registered', sortDir: 'asc' });
+
+    expect(res.data.map((r) => r.assetNumber)).toEqual(['A-002', 'A-001']);
+  });
+
+  test('สลับทิศของมูลค่าคงเหลือ — ถูกสุดขึ้นก่อน', async () => {
+    const cheap = await makeAsset({ assetNumber: 'A-001' });
+    const rich = await makeAsset({ assetNumber: 'A-002' });
+    await makeAccounting(cheap, { bookedCost: 1000, accumulatedDepreciation: 900 });
+    await makeAccounting(rich, { bookedCost: 5000, accumulatedDepreciation: 1000 });
+
+    const res = await list({ sort: 'netBookValue', sortDir: 'asc' });
+
+    expect(res.data.map((r) => r.assetNumber)).toEqual(['A-001', 'A-002']);
+  });
+
+  test('ไม่ส่ง sortDir = มาก/ใหม่ก่อน (ค่าตั้งต้น)', async () => {
+    await makeAsset({ assetNumber: 'A-001', sapCreatedDate: '2020-01-01' });
+    await makeAsset({ assetNumber: 'A-002', sapCreatedDate: '2026-08-31' });
+
+    const res = await list({ sort: 'registered' });
+
+    expect(res.data[0]!.assetNumber).toBe('A-002');
+  });
+
+  test('เรียงลำดับใช้ร่วมกับตัวกรองได้ — เรียงเฉพาะของที่ผ่านตัวกรอง', async () => {
+    await makeAsset({ assetNumber: 'A-001', status: 'Lost', sapCreatedDate: '2020-01-01' });
+    await makeAsset({ assetNumber: 'A-002', status: 'Active', sapCreatedDate: '2026-01-01' });
+    await makeAsset({ assetNumber: 'A-003', status: 'Lost', sapCreatedDate: '2024-01-01' });
+
+    const res = await list({ sort: 'registered', status: 'Lost' });
+
+    expect(res.total).toBe(2);
+    expect(res.data.map((r) => r.assetNumber)).toEqual(['A-003', 'A-001']);
+  });
+
+  test('ลำดับคงที่ข้ามหน้าเมื่อค่าที่เรียงเท่ากันทั้งชุด (ลงทะเบียนวันเดียวกันเป็นล็อต)', async () => {
+    for (let i = 1; i <= 6; i++) {
+      await makeAsset({ assetNumber: `A-${String(i).padStart(3, '0')}`, sapCreatedDate: '2017-04-04' });
+    }
+
+    const p1 = await list({ sort: 'registered', page: 1, limit: 3 });
+    const p2 = await list({ sort: 'registered', page: 2, limit: 3 });
+    const seen = [...p1.data, ...p2.data].map((r) => r.assetNumber);
+
+    expect(new Set(seen).size).toBe(6);
   });
 });
 
@@ -339,16 +466,20 @@ describe('กรองตามบริษัท', () => {
     expect(ubp.data[0]!.companyCode).toBe('UBP');
   });
 
+  // ★ แผนกต้องเป็นของบริษัทเดียวกับชิ้นตั้งแต่ 0026 (fk_asset_department เป็นคีย์คู่)
+  //   ชื่อแผนกซ้ำข้ามบริษัทได้ตามปกติ แต่เป็นคนละแถวคนละ id — ตรงกับของจริงใน ams_db
+  //   ที่มีชื่อซ้ำกัน 55 ชื่อ ตัวกรองสองแกนจึงต้องยังตัดกันถูกแม้ชื่อจะเหมือนกัน
   test('กรองบริษัทกับกรองแผนกตัดกันทั้งสองแกน', async () => {
-    const dep = await makeDepartment('แผนกทดสอบ');
-    await makeAsset({ assetNumber: 'A-001', companyCode: 'UBA', departmentId: dep });
-    await makeAsset({ assetNumber: 'A-002', companyCode: 'UBP', departmentId: dep });
+    const depUba = await makeDepartment('แผนกทดสอบ');
+    const depUbp = await makeDepartment('แผนกทดสอบ', 'UBP');
+    await makeAsset({ assetNumber: 'A-001', companyCode: 'UBA', departmentId: depUba });
+    await makeAsset({ assetNumber: 'A-002', companyCode: 'UBP', departmentId: depUbp });
     await makeAsset({ assetNumber: 'A-003', companyCode: 'UBP', departmentId: null });
 
     const res = await assetService.findInventory({
       page: 1,
       limit: 20,
-      departmentId: dep,
+      departmentId: depUbp,
       companyCode: 'UBP',
     });
 
@@ -395,6 +526,33 @@ describe('ตัวกรองหน้าทะเบียน', () => {
 
     expect(res.total).toBe(2);
     expect(res.data.every((r) => r.status === 'Lost')).toBe(true);
+  });
+
+  test('กรองตามผู้ถือครอง', async () => {
+    const somchai = await makeEmployee();
+    const somsri = await makeEmployee();
+    await makeAsset({ assetNumber: 'A-001', employeeId: somchai });
+    await makeAsset({ assetNumber: 'A-002', employeeId: somsri });
+    // ไม่มีผู้ถือครอง — ต้องไม่หลุดเข้ามาในผลของการกรองคนใดคนหนึ่ง
+    await makeAsset({ assetNumber: 'A-003' });
+
+    const res = await list({ employeeId: somchai });
+
+    expect(res.total).toBe(1);
+    expect(res.data[0]!.assetNumber).toBe('A-001');
+  });
+
+  test('กรองผู้ถือครองใช้ร่วมกับกรองสถานะได้ — ตัดกันทั้งสองแกน', async () => {
+    const somchai = await makeEmployee();
+    const somsri = await makeEmployee();
+    await makeAsset({ assetNumber: 'A-001', employeeId: somchai, status: 'Active' });
+    await makeAsset({ assetNumber: 'A-002', employeeId: somchai, status: 'Lost' });
+    await makeAsset({ assetNumber: 'A-003', employeeId: somsri, status: 'Lost' });
+
+    const res = await list({ employeeId: somchai, status: 'Lost' });
+
+    expect(res.total).toBe(1);
+    expect(res.data[0]!.assetNumber).toBe('A-002');
   });
 
   test('กรองตามปีบัญชี', async () => {
@@ -548,5 +706,164 @@ describe('ตัวกรองหน้าทะเบียน', () => {
 
     expect(res.total).toBe(1);
     expect(res.data[0]!.assetNumber).toBe('HIT-001');
+  });
+});
+
+// ═══ ที่ตั้งแบบชี้บนผังได้ — หน้า Audit พึ่งสี่ฟิลด์นี้ทั้งหมด ═══
+//
+// subLocationName ที่มีอยู่เดิมเป็นข้อความไว้อ่าน ชี้บนแผนที่ไม่ได้ หน้า Audit ต้องการ id
+// กับพิกัดจริง เทสต์ชุดนี้เฝ้าสองอย่าง: ฟิลด์มาครบ และตัวกรอง located ตัดถูกตัว
+describe('findInventory — ที่ตั้งบนผัง', () => {
+  /** ผูกห้อง (และหมุด) ให้ชิ้นที่สร้างไว้แล้ว — makeAsset ไม่รับสองอย่างนี้ */
+  async function place(
+    assetId: number,
+    subLocationId: number,
+    pin?: { posX: number; posY: number },
+  ) {
+    await db
+      .update(asset)
+      .set({ subLocationId, posX: pin?.posX ?? null, posY: pin?.posY ?? null })
+      .where(eq(asset.id, assetId));
+  }
+
+  test('located=true เอาเฉพาะชิ้นที่ระบุห้องแล้ว และ total นับตามที่กรอง', async () => {
+    const room = await makeSubLocation(locationId, { floor: '2', planKey: 'floor-2' });
+    const pinned = await makeAsset({ assetNumber: 'LOC-001' });
+    await place(pinned, room, { posX: 0.25, posY: 0.4 });
+    const roomOnly = await makeAsset({ assetNumber: 'LOC-002' });
+    await place(roomOnly, room);
+    await makeAsset({ assetNumber: 'LOC-003' }); // ไม่ระบุห้อง
+
+    const res = await assetService.findInventory({ page: 1, limit: 20, located: true });
+
+    // ★ total ต้องเป็น 2 ไม่ใช่ 3 — คิวรีนับไม่ได้ join ตารางห้อง เงื่อนไขจึงต้องอยู่ที่
+    //   asset.subLocationId เท่านั้น ถ้าเผลอไปเขียนที่คอลัมน์ของ asset_sub_location
+    //   ตารางจะมา 2 แถวแต่เพจบอก 3 (บั๊กแบบเดียวกับที่ fiscalYear เคยเจอ)
+    expect(res.total).toBe(2);
+    expect(res.data.map((d) => d.assetNumber)).toEqual(['LOC-001', 'LOC-002']);
+  });
+
+  test('ไม่ส่ง located = เห็นครบเหมือนเดิม (หน้าทะเบียน/Dashboard ต้องไม่กระทบ)', async () => {
+    const room = await makeSubLocation(locationId);
+    const withRoom = await makeAsset({ assetNumber: 'ALL-001' });
+    await place(withRoom, room);
+    await makeAsset({ assetNumber: 'ALL-002' });
+
+    const res = await assetService.findInventory({ page: 1, limit: 20 });
+
+    expect(res.total).toBe(2);
+  });
+
+  test('คืน subLocationId / planKey / floor / หมุด ครบ และเป็น null ทั้งชุดเมื่อไม่ระบุห้อง', async () => {
+    const room = await makeSubLocation(locationId, { floor: '2', room: 'ห้องบัญชี', planKey: 'floor-2' });
+    const pinned = await makeAsset({ assetNumber: 'PIN-001' });
+    await place(pinned, room, { posX: 0.25, posY: 0.4 });
+    const roomOnly = await makeAsset({ assetNumber: 'PIN-002' });
+    await place(roomOnly, room);
+    await makeAsset({ assetNumber: 'PIN-003' });
+
+    const res = await assetService.findInventory({ page: 1, limit: 20 });
+    const byNumber = new Map(res.data.map((d) => [d.assetNumber, d]));
+
+    expect(byNumber.get('PIN-001')).toMatchObject({
+      subLocationId: room,
+      planKey: 'floor-2',
+      floor: '2',
+      posX: 0.25,
+      posY: 0.4,
+    });
+
+    // รู้ห้องแต่ยังไม่ปักหมุด — ยังพา auditor ไปถูกห้องได้ ต้องไม่ถูกกลบเป็น null ทั้งก้อน
+    expect(byNumber.get('PIN-002')).toMatchObject({
+      subLocationId: room,
+      planKey: 'floor-2',
+      posX: null,
+      posY: null,
+    });
+
+    expect(byNumber.get('PIN-003')).toMatchObject({
+      subLocationId: null,
+      planKey: null,
+      floor: null,
+      posX: null,
+      posY: null,
+    });
+  });
+});
+
+describe('สุ่มรายการตรวจ (random) — หน้า Audit', () => {
+  /** สร้างของ 6 ชิ้น เลข A-001..A-006 ทั้งหมดลงทะเบียนแล้ว */
+  async function seedSix() {
+    for (const n of ['A-001', 'A-002', 'A-003', 'A-004', 'A-005', 'A-006']) {
+      await makeAsset({ assetNumber: n });
+    }
+  }
+
+  test('คืนตามจำนวน limit และทุกชิ้นมาจากกองที่มีจริง', async () => {
+    await seedSix();
+
+    const res = await list({ limit: 3, random: true });
+
+    expect(res.data).toHaveLength(3);
+    // total ยังเป็นยอดของ "ทั้งกองที่กรองแล้ว" ไม่ใช่จำนวนที่สุ่มออกมา — จอเอาไปขึ้นว่า
+    // "สุ่มมา 3 จาก 6 ชิ้นที่ตรงเงื่อนไข"
+    expect(res.total).toBe(6);
+    for (const row of res.data) {
+      expect(row.assetNumber).toMatch(/^A-00[1-6]$/);
+    }
+  });
+
+  test('ไม่คืนชิ้นซ้ำในชุดเดียวกัน', async () => {
+    await seedSix();
+
+    const numbers = (await list({ limit: 6, random: true })).data.map((d) => d.assetNumber);
+
+    expect(new Set(numbers).size).toBe(6);
+  });
+
+  test('ตัวกรองยังทำงาน — สุ่มจากผลที่กรองแล้ว ไม่ใช่จากทั้งทะเบียน', async () => {
+    await seedSix();
+    await makeAsset({ assetNumber: 'B-001', status: 'Lost' });
+    await makeAsset({ assetNumber: 'B-002', status: 'Lost' });
+
+    const res = await list({ limit: 20, random: true, status: 'Lost' });
+
+    expect(res.total).toBe(2);
+    expect(res.data.map((d) => d.assetNumber).sort()).toEqual(['B-001', 'B-002']);
+  });
+
+  test('ของที่ยังไม่ออกเลข/ถูกลบ ไม่ถูกสุ่มติดมา', async () => {
+    await makeAsset({ assetNumber: 'A-001' });
+    await makeAsset({ assetNumber: 'D-001', lifecycle: 'DRAFT' });
+    await makeAsset({ assetNumber: 'X-001', deleted: true });
+
+    const res = await list({ limit: 20, random: true });
+
+    expect(res.data.map((d) => d.assetNumber)).toEqual(['A-001']);
+  });
+
+  test('page > 1 ไม่ตัดหัวชุดทิ้ง — offset ถูกบังคับเป็น 0', async () => {
+    // ★ ถ้าไม่บังคับ offset หน้า 2 ของการสุ่มจะได้ผลว่างเมื่อของมีน้อยกว่า limit*2
+    //   ซึ่งดูเหมือน "สุ่มแล้วไม่เจออะไรเลย" ทั้งที่มีของอยู่
+    await seedSix();
+
+    const res = await list({ page: 3, limit: 3, random: true });
+
+    expect(res.data).toHaveLength(3);
+  });
+
+  test('ไม่ส่ง random = เรียงตามเลขเหมือนเดิม (หน้าทะเบียน/Dashboard ไม่กระทบ)', async () => {
+    await seedSix();
+
+    const res = await list({ limit: 6 });
+
+    expect(res.data.map((d) => d.assetNumber)).toEqual([
+      'A-001',
+      'A-002',
+      'A-003',
+      'A-004',
+      'A-005',
+      'A-006',
+    ]);
   });
 });

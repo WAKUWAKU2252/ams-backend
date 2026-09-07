@@ -34,6 +34,34 @@ mock.module('@intrastucture/db', () => ({
   connectDb: async () => {},
 }));
 
+// ═══ SAP: ปิดประตูให้ทั้ง process ไม่ใช่ประกาศเองรายไฟล์ ═══
+//
+// ⚠️ ด่านตัด globalThis.fetch ข้างล่างครอบตัวนี้ไม่ได้ — mssql คุยผ่าน TCP ไม่ใช่ HTTP
+//    ปลายทางคือ SBO_PRD_UBA ซึ่งเป็น ERP จริงที่คนทั้งบริษัทใช้อยู่
+//
+// เดิมสองไฟล์ (asset-sync-po-flow / asset-accounting-sync) ประกาศ mock นี้เองไฟล์ใครไฟล์มัน
+// ซึ่งกันได้แค่ตัวเอง: bun รันทุกไฟล์ใน process เดียวก็จริง แต่ลำดับไม่การันตี ไฟล์ใหม่ที่
+// import connector แล้วบังเอิญรันก่อนสองไฟล์นั้นจะได้ sapQuery ตัวจริงไปเต็ม ๆ
+//
+// ★ ต้องอยู่ "หลัง" mock ของ @intrastucture/db เสมอ — sap/client.ts มี import { db } อยู่
+//   (resolveDbName/sapCompanies ใช้) วางก่อนเมื่อไหร่ ตอน await import มันจะไปดึง db ตัวจริง
+//   ที่ต่อ Postgres ของเซิร์ฟเวอร์ ซึ่งคือสิ่งเดียวกับที่ทั้งไฟล์นี้ตั้งใจกัน
+//
+// ★ คงของจริงไว้ทุกตัวยกเว้น sapQuery — connector ใช้ asDateTime จากไฟล์เดียวกัน และ
+//   index.ts ใช้ closeSap (ตรวจแล้วไม่มีเทสต์ไหนต้องการ sapQuery ตัวจริง)
+//
+// ★ การ import เฉย ๆ ไม่ต่อ SAP — pool เป็น lazy สร้างตอนเรียก sapQuery เท่านั้น
+const realSapClient = await import('@intrastucture/sap/client');
+mock.module('@intrastucture/sap/client', () => ({
+  ...realSapClient,
+  sapQuery: async () => {
+    throw new Error(
+      'เทสต์พยายามคิวรี SAP จริง — ปลายทางคือ ERP ของบริษัท ' +
+        '(ถ้าเทสต์ต้องการผลจาก SAP ให้ mock ทับเป็นราย ๆ ไปในไฟล์นั้น)',
+    );
+  },
+}));
+
 // Teams/Power Automate: ห้ามยิงออกเน็ตจริงระหว่างเทสต์ — คืนค่าสำเร็จแบบเงียบ ๆ
 // (เทสต์ที่สนใจ "แจ้งล้มแล้วเกิดอะไรขึ้น" จะ mock ทับเองในไฟล์ของตัวเอง)
 //

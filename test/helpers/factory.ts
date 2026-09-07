@@ -7,6 +7,7 @@ import {
   assetRequestLine,
   department,
   employee,
+  employeeCompany,
   grpo,
   grpoLine,
   purchaseOrder,
@@ -35,15 +36,39 @@ export async function resetDb() {
 
 const uniq = () => crypto.randomUUID().slice(0, 8);
 
-export async function makeDepartment(name = `แผนก ${uniq()}`): Promise<number> {
-  const [d] = await db.insert(department).values({ name }).returning();
+/**
+ * companyCode รับเข้ามาได้ตั้งแต่ 0024 — แผนกเป็นของบริษัทแล้ว ไม่ใช่ของกลาง
+ * ค่าเริ่มต้นเป็น TEST_COMPANY เพื่อให้เทสต์เดิมที่เรียก makeDepartment() เปล่า ๆ ไม่ต้องแก้
+ * (TEST_COMPANY ประกาศอยู่ใต้ไฟล์ อ่านตอนถูกเรียกซึ่งเป็นหลัง module init เสมอ)
+ */
+export async function makeDepartment(
+  name = `แผนก ${uniq()}`,
+  companyCode: string = TEST_COMPANY,
+): Promise<number> {
+  const [d] = await db.insert(department).values({ name, companyCode }).returning();
   return d!.id;
 }
 
+/**
+ * พนักงานหนึ่งคน + ตัวตนในบริษัทหนึ่งบริษัท (employee_company)
+ *
+ * ★ สร้างแถว employee_company ให้เสมอตั้งแต่ 0025 — เส้นทางหาผู้อนุมัติอ่านจากตารางนั้น
+ *   ที่เดียวแล้ว ไม่ได้อ่าน employee.departmentId อีก เทสต์ที่ไม่มีแถวนี้จะหาหัวหน้าไม่เจอ
+ *   ทั้งที่ตั้งใจให้เจอ (ดู findApprovalTarget)
+ *
+ * ownerCode ใส่ให้เมื่อระบุเท่านั้น — ปล่อย NULL คือ "คนที่ยังไม่มีตัวตนใน OHEM"
+ * ซึ่งเปิด PO ไม่ได้ แต่ยังเป็นหัวหน้าแผนก/ผู้ถือครองสินทรัพย์ได้ตามปกติ
+ */
 export async function makeEmployee(
-  opts: { departmentId?: number; email?: string | null } = {},
+  opts: {
+    departmentId?: number;
+    email?: string | null;
+    companyCode?: string;
+    ownerCode?: number;
+  } = {},
 ): Promise<number> {
-  const departmentId = opts.departmentId ?? (await makeDepartment());
+  const companyCode = opts.companyCode ?? TEST_COMPANY;
+  const departmentId = opts.departmentId ?? (await makeDepartment(undefined, companyCode));
   const [e] = await db
     .insert(employee)
     .values({
@@ -55,6 +80,12 @@ export async function makeEmployee(
       departmentId,
     })
     .returning();
+  await db.insert(employeeCompany).values({
+    employeeId: e!.id,
+    companyCode,
+    ownerCode: opts.ownerCode ?? null,
+    departmentId,
+  });
   return e!.id;
 }
 
@@ -213,6 +244,46 @@ export async function makeLocation(code = `LOC-${uniq()}`): Promise<number> {
     .values({ code, name: `สถานที่ ${code}` })
     .returning();
   return l!.id;
+}
+
+/**
+ * "ตึก" ของผัง — asset_location ที่ติดธง isPlanArea (0023)
+ *
+ * แยก helper จาก makeLocation เพราะสองอย่างนี้คนละชนิดกันตั้งแต่ 0022: ตัวนี้มีไว้ให้ห้อง
+ * ห้อยเท่านั้น ห้ามโผล่ใน dropdown บัญชีและใส่เป็น asset.locationId ไม่ได้
+ */
+export async function makePlanArea(code = `BLD-${uniq()}`): Promise<number> {
+  const { assetLocation } = await import('@intrastucture/db/schema');
+  const [l] = await db
+    .insert(assetLocation)
+    .values({ code, name: `ตึก ${code}`, isPlanArea: true })
+    .returning();
+  return l!.id;
+}
+
+/** ห้องบนผัง — ต้องมี planKey + polygon ถึงจะโผล่ใน /master/floor-plans */
+export async function makeSubLocation(
+  locationId: number,
+  opts: { floor?: string; room?: string; planKey?: string } = {},
+): Promise<number> {
+  const { assetSubLocation } = await import('@intrastucture/db/schema');
+  const [s] = await db
+    .insert(assetSubLocation)
+    .values({
+      code: `ROOM-${uniq()}`,
+      locationId,
+      floor: opts.floor ?? '1',
+      room: opts.room ?? `ห้อง ${uniq()}`,
+      planKey: opts.planKey ?? 'floor-1',
+      polygon: [
+        [0.1, 0.1],
+        [0.3, 0.1],
+        [0.3, 0.3],
+        [0.1, 0.3],
+      ],
+    })
+    .returning();
+  return s!.id;
 }
 
 /** เปลี่ยนสถานะใบตรง ๆ — ใช้จำลอง "ใบรอบก่อนที่ปิดไปแล้ว" โดยไม่ต้องเดินทั้ง flow */

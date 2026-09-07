@@ -10,7 +10,7 @@
 //
 // ถ้าใครเผลอปลดล็อกคอลัมน์เพิ่ม งานที่คนกรอกเอง (ที่ตั้ง/ผู้ถือครอง/แผนก) จะถูกดึงกลับเป็น
 // ค่าของ SAP ทุกนาทีที่ scheduler เดิน โดยไม่มีอะไรฟ้อง
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { beforeEach, describe, expect, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
 import { db } from '@intrastucture/db';
 import {
@@ -19,6 +19,7 @@ import {
   category,
   department,
   employee,
+  employeeCompany,
   purchaseOrderItem,
   sapAssetUnknownNumber,
 } from '@intrastucture/db/schema';
@@ -26,21 +27,14 @@ import type { Tx } from '@modules/integrate/SAP/sync.types';
 import { makeEmployee, makePo, makeGrpo, makeRequest, makeUser, resetDb, TEST_COMPANY } from './helpers/factory';
 import { assetQrUrl } from '@common/app-url';
 
-// ── ปิดประตู SAP ก่อน import connector
+// ── ประตู SAP ปิดอยู่แล้วจาก test/setup.ts (preload) ไม่ต้องประกาศซ้ำที่นี่
 //
 // apply() ที่เทสต์นี้เรียกไม่แตะ SAP อยู่แล้ว (pool เป็น lazy และ sapQuery ถูกเรียกจาก
-// fetch() เท่านั้น) แต่ถ้าวันหลังมีใครเผลอเรียกเพิ่มเข้ามา ต้องระเบิดตรงนี้ ไม่ใช่ไปโผล่
-// เป็นคิวรีบน SBO_PRD_UBA ซึ่งเป็น ERP จริงที่คนทั้งบริษัทใช้อยู่
+// fetch() เท่านั้น) แต่ถ้าวันหลังมีใครเผลอเรียกเพิ่มเข้ามา sapQuery จะระเบิดให้เอง
+// ไม่ใช่ไปโผล่เป็นคิวรีบน SBO_PRD_UBA ซึ่งเป็น ERP จริงที่คนทั้งบริษัทใช้อยู่
 //
-// ด่านตัด fetch ใน test/setup.ts ครอบตัวนี้ไม่ได้ — mssql คุยผ่าน TCP ไม่ใช่ HTTP
-// คงของจริงไว้ทุกตัวยกเว้น sapQuery เพราะ connector ตัวอื่นใช้ asDateTime จากไฟล์เดียวกัน
-const realSapClient = await import('@intrastucture/sap/client');
-mock.module('@intrastucture/sap/client', () => ({
-  ...realSapClient,
-  sapQuery: async () => {
-    throw new Error('เทสต์พยายามคิวรี SAP จริง — apply() ไม่ควรแตะ SAP เลย');
-  },
-}));
+// เดิม mock นี้อยู่ในไฟล์นี้เอง ย้ายไป setup.ts เพราะกันได้แค่ไฟล์ตัวเอง — ไฟล์ใหม่ที่
+// import connector แล้วบังเอิญรันก่อนไฟล์นี้จะได้ sapQuery ตัวจริงไปเต็ม ๆ
 
 // connector เป็น factory ตั้งแต่ 0021 — ผูกกับบริษัทก่อนใช้
 const { makeAssetConnector } = await import('@modules/integrate/SAP/connectors/asset.connector');
@@ -76,7 +70,6 @@ function sapRow(over: Partial<LegacyAssetRow> = {}): LegacyAssetRow {
     acqDate: null,
     vendor: null,
     invoiceNo: null,
-    acqCost: null,
     acquisitionPostedTotal: null,
     // ชุดบัญชีมาในคิวรีเดียวกันแล้ว — ไฟล์นี้ไม่ได้ทดสอบส่วนนั้น ปล่อยว่างทั้งชุด
     // (ทดสอบแยกที่ asset-accounting-sync.test.ts)
@@ -146,7 +139,7 @@ async function seedMasters() {
   // AMS ทั้งหมด เพื่อให้ resolve สำเร็จ เทสต์จะได้พิสูจน์ว่า "ไม่เขียน" ไม่ใช่ "เขียนไม่ได้"
   const [sapDept] = await db
     .insert(department)
-    .values({ name: 'แผนกที่ SAP ชี้มา', departmentId: '775' })
+    .values({ name: 'แผนกที่ SAP ชี้มา', departmentId: '775', companyCode: TEST_COMPANY })
     .returning();
   await db.insert(assetLocation).values({
     code: 'SAP-LOC',
@@ -154,7 +147,8 @@ async function seedMasters() {
     sapLocationId: 42,
   });
   const sapEmployeeId = await makeEmployee({ departmentId: sapDept!.id });
-  await db.update(employee).set({ ownerCodeUba: 999 }).where(eq(employee.id, sapEmployeeId));
+  // ตัวตนของคนนี้ในบริษัทที่เทสต์ใช้ — sync map OwnerCode -> employee.id ผ่าน employee_company (0025)
+  await db.update(employeeCompany).set({ ownerCode: 999 }).where(eq(employeeCompany.employeeId, sapEmployeeId));
 }
 
 /** สินทรัพย์หนึ่งชิ้นที่ลงทะเบียนผ่าน AMS ครบโซ่ PO (ck_asset_origin_chain บังคับทั้งชุด) */
@@ -168,7 +162,7 @@ async function makePoFlowAsset(
   const amsDepartmentId = (
     await db
       .insert(department)
-      .values({ name: `แผนกของ AMS ${seq}`, departmentId: `10${seq}` })
+      .values({ name: `แผนกของ AMS ${seq}`, departmentId: `10${seq}`, companyCode: TEST_COMPANY })
       .returning()
   )[0]!.id;
   const amsEmployeeId = await makeEmployee({ departmentId: amsDepartmentId });
@@ -548,5 +542,40 @@ describe('QR ของสินทรัพย์ที่ sync มาจาก 
     expect((await readAsset(ams.assetId)).qrCode).toBe(
       'https://ams.example.com/assets/COM-100-05-002',
     );
+  });
+});
+
+// ═══ แผนกต้องหาจากบริษัทของ connector เท่านั้น (0026) ═══
+//
+// รหัสแผนกเป็นผังของแต่ละบริษัท ไม่ใช่เลขที่ไม่ซ้ำทั้งเครือ — '775' มีอยู่ทั้ง UBA/UBP/MIG
+// คนละแผนกกัน (MIG ชน UBA 32 จาก 33 รหัส) ถ้า connector ดึงแผนกมาทั้งตารางแล้วทำ Map
+// ด้วยรหัสเป็นคีย์ ตัวสุดท้ายที่ select คืนมาจะชนะเงียบ ๆ
+//
+// ★ ตั้งแต่ 0026 fk_asset_department เป็นคีย์คู่ (departmentId, companyCode) ผลของการ
+//   resolve ข้ามบริษัทจึงไม่ใช่แค่ข้อมูลเพี้ยน แต่ **insert ไม่ผ่านและ sync ล้มทั้งรอบ**
+describe('resolve แผนกข้ามบริษัท', () => {
+  test('รหัสแผนกซ้ำข้ามบริษัท → ต้องได้แผนกของบริษัทที่ sync อยู่', async () => {
+    // แผนกรหัสเดียวกันของอีกบริษัท สร้าง "ทีหลัง" เพื่อให้ Map ที่ไม่กรองเก็บตัวนี้ชนะ
+    const [otherCompanyDept] = await db
+      .insert(department)
+      .values({ name: 'แผนกรหัสซ้ำของอีกบริษัท', departmentId: '775', companyCode: 'UBP' })
+      .returning();
+
+    await assetConnector.apply(tx, pull([sapRow({ assetNumber: 'COM-100-05-777' })]));
+
+    const [row] = await db
+      .select({ departmentId: asset.departmentId, companyCode: asset.companyCode })
+      .from(asset)
+      .where(eq(asset.assetNumber, 'COM-100-05-777'));
+
+    expect(row!.companyCode).toBe(TEST_COMPANY);
+    // ★ ต้องไม่ใช่แผนกของ UBP — ก่อนแก้ 0026 บรรทัดนี้จะได้ otherCompanyDept
+    expect(row!.departmentId).not.toBe(otherCompanyDept!.id);
+
+    const [dept] = await db
+      .select({ companyCode: department.companyCode })
+      .from(department)
+      .where(eq(department.id, row!.departmentId!));
+    expect(dept!.companyCode).toBe(TEST_COMPANY);
   });
 });

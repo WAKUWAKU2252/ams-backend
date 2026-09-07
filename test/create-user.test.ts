@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
 import { db } from '@intrastucture/db';
-import { employee, role, user } from '@intrastucture/db/schema';
+import { employee, employeeCompany, role, user } from '@intrastucture/db/schema';
 import { createUser } from '@modules/shared/user/user.service';
 import { makeDepartment, makeEmployee, resetDb } from './helpers/factory';
 
@@ -43,6 +43,43 @@ describe('createUser', () => {
     expect(emp!.departmentId).toBe(departmentId);
     // ห้ามมี passwordHash หลุดออก API
     expect('passwordHash' in created).toBe(false);
+  });
+
+  // ── ตัวตนรายบริษัทต้องเกิดพร้อมพนักงานเสมอ (0025) ─────────────────────────
+  //
+  // ก่อน 0025 บรรทัดนี้เขียน employee.ownerCodeUba ตายตัว = คนที่ถูกสร้างให้แผนกของ
+  // UBP/MIG จะได้ตัวตนฝั่ง UBA แทน แล้ว PO ของบริษัทเขา resolve ผู้ขอไม่เจอ
+  // และถ้าไม่สร้างแถวนี้เลย คนนั้นจะ "มีอยู่" แต่ส่งคำขอไม่ได้โดยไม่มีอะไรบอกว่าทำไม
+  test('★ สร้างพนักงานใหม่ = ได้แถว employee_company ของบริษัทตามแผนกที่เลือก', async () => {
+    const ubpDept = await makeDepartment('จัดซื้อ UBP', 'UBP');
+    const created = await createUser(
+      base({
+        employee: { firstName: 'ทดสอบ', lastName: 'ยูบีพี', departmentId: ubpDept, ownerCode: 4242 },
+      }) as never,
+    );
+
+    const [link] = await db
+      .select()
+      .from(employeeCompany)
+      .where(eq(employeeCompany.employeeId, created.employeeId!));
+
+    // ★ ต้องเป็น UBP ตามแผนก ไม่ใช่ UBA ตามค่าตั้งต้นเดิม
+    expect(link!.companyCode).toBe('UBP');
+    expect(link!.departmentId).toBe(ubpDept);
+    expect(link!.ownerCode).toBe(4242);
+  });
+
+  test('OwnerCode ซ้ำในบริษัทเดียวกัน = 409 ที่อ่านรู้เรื่อง ไม่ใช่ 500', async () => {
+    const dept = await makeDepartment('บัญชี UBP', 'UBP');
+    await createUser(
+      base({ employee: { firstName: 'คนแรก', departmentId: dept, ownerCode: 77 } }) as never,
+    );
+
+    expect(
+      createUser(
+        base({ employee: { firstName: 'คนที่สอง', departmentId: dept, ownerCode: 77 } }) as never,
+      ),
+    ).rejects.toThrow(/OwnerCode/);
   });
 
   test('ผูกกับพนักงานที่มีอยู่ได้ตามเดิม', async () => {

@@ -14,7 +14,7 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
 import { db } from '@intrastucture/db';
-import { asset, assetAccounting, department } from '@intrastucture/db/schema';
+import { asset, assetAccounting, department, employee } from '@intrastucture/db/schema';
 import * as dashboardService from '@modules/business/dashboard/dashboard.service';
 import { makeDepartment, makeEmployee, makeLocation, makeUser, resetDb, TEST_COMPANY } from './helpers/factory';
 
@@ -408,6 +408,16 @@ describe('ยอดเงิน', () => {
 });
 
 describe('สถานะ active/inactive', () => {
+  /**
+   * ★ 'Under Maintenance' ในเทสต์นี้ **ไม่ใช่สถานะที่ระบบรองรับแล้ว** — อย่าเอาไปใช้เป็นตัวอย่าง
+   *
+   * สถานะเหลือแค่ Active/Inactive ตาม SAP (ดู shared/utils/asset-status.ts) แต่ enum ใน DB
+   * ยังมีค่าเก่าค้างอยู่เพราะ postgres ลบค่าใน enum ไม่ได้ — แถวที่ถือค่านั้นจึงยังเกิดได้จาก
+   * สคริปต์หรือการแก้ SQL ด้วยมือ
+   *
+   * เทสต์นี้จึงเฝ้าว่า **ของแปลกต้องไม่หายเงียบ ๆ**: มันต้องโผล่ใน breakdown (ต่อท้ายสุด)
+   * และผลรวมของ breakdown ต้องเท่ากับ totals เสมอ ไม่งั้นตัวเลขบนจอจะกระทบยอดกันไม่ได้
+   */
   test('active คือ Active ล้วน ที่เหลือรวมเป็น inactive', async () => {
     const userId = await makeUser({ roleName: 'ADMIN' });
     const dep = await makeDepartment();
@@ -520,13 +530,39 @@ describe('กรองตามบริษัท', () => {
     expect(res.totals.netBookValue).toBe(5000);
   });
 
+  // ── ลิสต์แผนกต้องกรองตามบริษัทด้วย (0025) ────────────────────────────────
+  //
+  // เดิมกรองบริษัทไว้ใน ON ของ join เท่านั้น แถวแผนกจึงหลุดมาครบทุกบริษัท — ไม่มีใครเห็น
+  // ปัญหาตอนมีบริษัทเดียว พอมี 3 บริษัทตารางบน dashboard พุ่งจาก 61 เป็น 151 แถว
+  // โดย 120 แถวเป็น 0 ชิ้น และชื่อซ้ำกันข้ามบริษัท 55 ชื่อจนเลือกไม่ถูก
+  test('เลือกบริษัทแล้ว ลิสต์แผนกเหลือเฉพาะของบริษัทนั้น', async () => {
+    const userId = await makeUser({ roleName: 'ADMIN' });
+    await makeDepartment('แผนกของ UBA');
+    await makeDepartment('แผนกของ UBP', 'UBP');
+
+    const all = await dashboardService.overview(asRole(userId, 'ADMIN'), {});
+    expect(all.byDepartment.map((d) => d.departmentName).sort()).toEqual([
+      'แผนกของ UBA',
+      'แผนกของ UBP',
+    ]);
+
+    const ubp = await dashboardService.overview(asRole(userId, 'ADMIN'), { companyCode: 'UBP' });
+    expect(ubp.byDepartment.map((d) => d.departmentName)).toEqual(['แผนกของ UBP']);
+    // หน้าจอใช้ค่านี้กำกับชื่อตอนดูทั้งเครือ — ไม่มีก็แยกแผนกชื่อซ้ำไม่ออก
+    expect(ubp.byDepartment[0]!.companyCode).toBe('UBP');
+  });
+
   // ★ ใจกลางของ describe นี้ — byDepartment ต้องกระทบยอดกับ totals เสมอ ทุกชุดตัวกรอง
   //   ถ้าลืมส่งบริษัทเข้า summarizeByDepartment ข้อนี้จะจับได้ทันที
+  // ★ แผนกต้องสร้างในบริษัทของชิ้นเสมอตั้งแต่ 0026 — fk_asset_department เป็นคีย์คู่แล้ว
+  //   (departmentId, companyCode) การเอาชิ้นของ UBP ไปใส่แผนกของ UBA แบบเดิม DB ปฏิเสธ
+  //   ซึ่งตรงกับของจริง: แผนกเป็นของบริษัท ไม่ใช่ของกลางทั้งเครือ
   test('sum(byDepartment.assets) เท่ากับ totals.assets เมื่อกรองบริษัท', async () => {
     const userId = await makeUser({ roleName: 'ADMIN' });
-    const a = await makeDepartment('แผนก ก');
-    const b = await makeDepartment('แผนก ข');
-    await makeAsset({ departmentId: a, companyCode: 'UBA' });
+    const ubaDept = await makeDepartment('แผนก ก');
+    const a = await makeDepartment('แผนก ก ของ UBP', 'UBP');
+    const b = await makeDepartment('แผนก ข ของ UBP', 'UBP');
+    await makeAsset({ departmentId: ubaDept, companyCode: 'UBA' });
     await makeAsset({ departmentId: a, companyCode: 'UBP' });
     await makeAsset({ departmentId: b, companyCode: 'UBP' });
     await makeAsset({ departmentId: b, companyCode: 'UBP' });
@@ -540,9 +576,10 @@ describe('กรองตามบริษัท', () => {
 
   test('กรองบริษัทกับกรองแผนกตัดกันทั้งสองแกน', async () => {
     const userId = await makeUser({ roleName: 'ADMIN' });
-    const a = await makeDepartment('แผนก ก');
-    const b = await makeDepartment('แผนก ข');
-    await makeAsset({ departmentId: a, companyCode: 'UBA' });
+    const ubaDept = await makeDepartment('แผนก ก');
+    const a = await makeDepartment('แผนก ก ของ UBP', 'UBP');
+    const b = await makeDepartment('แผนก ข ของ UBP', 'UBP');
+    await makeAsset({ departmentId: ubaDept, companyCode: 'UBA' });
     await makeAsset({ departmentId: a, companyCode: 'UBP' });
     await makeAsset({ departmentId: b, companyCode: 'UBP' });
 
@@ -554,15 +591,18 @@ describe('กรองตามบริษัท', () => {
     expect(res.totals.assets).toBe(1);
   });
 
-  // พนักงานทั่วไปเลือกบริษัทได้ (ไม่ใช่แกนของสิทธิ์) แต่แผนกยังถูกล็อกอยู่เหมือนเดิม
-  test('EMPLOYEE เลือกบริษัทได้ แต่ยังถูกล็อกแผนกตัวเอง', async () => {
-    const mine = await makeDepartment('แผนกของฉัน');
-    const other = await makeDepartment('แผนกอื่น');
-    const emp = await makeEmployee({ departmentId: mine });
+  // พนักงานทั่วไปถูกล็อกทั้งสองแกน — เทสต์นี้ยิงบริษัทที่ตรงกับของตัวเองพอดี จึงเห็นแค่
+  // ว่าสองแกนทำงานร่วมกันได้ ส่วนเคสที่ยิงบริษัท "อื่น" มาอยู่ใน describe ข้างล่าง
+  //
+  // ★ พนักงานสังกัดแผนกของ UBP ในเทสต์นี้ เพราะของที่เขาต้องเห็นเป็นของ UBP —
+  //   แผนกกับชิ้นต้องเป็นบริษัทเดียวกันตั้งแต่ 0026
+  test('EMPLOYEE ถูกล็อกทั้งบริษัทและแผนกของตัวเอง', async () => {
+    const mine = await makeDepartment('แผนกของฉัน', 'UBP');
+    const other = await makeDepartment('แผนกอื่น', 'UBP');
+    const emp = await makeEmployee({ departmentId: mine, companyCode: 'UBP' });
     const userId = await makeUser({ roleName: 'EMPLOYEE', employeeId: emp });
 
     await makeAsset({ departmentId: mine, companyCode: 'UBP' });
-    await makeAsset({ departmentId: mine, companyCode: 'UBA' });
     await makeAsset({ departmentId: other, companyCode: 'UBP' });
 
     const res = await dashboardService.overview(asRole(userId, 'EMPLOYEE'), {
@@ -573,7 +613,123 @@ describe('กรองตามบริษัท', () => {
     expect(res.scope.departmentId).toBe(mine);
     expect(res.scope.locked).toBe(true);
     expect(res.scope.companyCode).toBe('UBP');
+    expect(res.scope.companyLocked).toBe(true);
     expect(res.totals.assets).toBe(1);
+  });
+});
+
+// ═══ ล็อกบริษัทตาม role ═══
+//
+// ★ ทำไมต้องมีเทสต์ชุดนี้: บริษัทเพิ่งกลายเป็น "แกนของสิทธิ์" ตัวที่สอง เดิมทุก role
+//   เลือกบริษัทไหนก็ได้ การพลาดตรงนี้ไม่ทำให้อะไรพัง แค่ทำให้พนักงานของบริษัทหนึ่ง
+//   อ่านมูลค่าทรัพย์สินของอีกบริษัทในเครือได้ — ซึ่งไม่มีอะไรบนหน้าจอฟ้องเลย
+//
+// ★ makeEmployee ไม่ได้เขียน employee.companyCode ให้ (มันเขียนแค่แถว employee_company)
+//   เทสต์ที่ต้องการทดสอบ "สังกัดตาม HR" จึงต้อง update คอลัมน์นั้นเอง — จงใจไม่ไปแก้
+//   factory เพราะเทสต์ชุดอื่นพึ่งพาพฤติกรรมเดิม (ไม่มีค่า = ถอยไปใช้บริษัทของแผนก)
+describe('ล็อกบริษัทตาม role', () => {
+  const setHrCompany = (employeeId: number, companyCode: string) =>
+    db.update(employee).set({ companyCode }).where(eq(employee.id, employeeId));
+
+  test('EMPLOYEE ส่งบริษัทอื่นมา → ถูกทิ้ง แล้วบังคับเป็นบริษัทตัวเอง', async () => {
+    const mine = await makeDepartment('แผนกของฉัน', 'UBP');
+    const ubaDept = await makeDepartment('แผนกของ UBA', 'UBA');
+    const emp = await makeEmployee({ departmentId: mine, companyCode: 'UBP' });
+    await setHrCompany(emp, 'UBP');
+    const userId = await makeUser({ roleName: 'EMPLOYEE', employeeId: emp });
+
+    await makeAsset({ departmentId: mine, companyCode: 'UBP' });
+    await makeAsset({ departmentId: ubaDept, companyCode: 'UBA' });
+
+    const res = await dashboardService.overview(asRole(userId, 'EMPLOYEE'), {
+      companyCode: 'UBA',
+    });
+
+    expect(res.scope.companyCode).toBe('UBP');
+    expect(res.scope.companyLocked).toBe(true);
+  });
+
+  // ★ ข้อที่ห้ามล้ม — byCompany ถูกส่งออก API ทั้งก้อนพร้อมยอดเงินรายบริษัท
+  //   ต่อให้ scope.companyCode ถูกต้องแล้ว ถ้าก้อนนี้ยังมีบริษัทอื่นติดไป ข้อมูลก็รั่วอยู่ดี
+  //   (หน้าจอไม่ได้แสดงก็จริง แต่ response ที่ผู้ใช้เปิด devtools ดูได้ก็คือรั่วแล้ว)
+  test('byCompany ของคนที่ถูกล็อก ต้องเหลือบริษัทเดียว ไม่ติดยอดเงินบริษัทอื่นไป', async () => {
+    const mine = await makeDepartment('แผนกของฉัน', 'UBP');
+    const ubaDept = await makeDepartment('แผนกของ UBA', 'UBA');
+    const emp = await makeEmployee({ departmentId: mine, companyCode: 'UBP' });
+    await setHrCompany(emp, 'UBP');
+    const userId = await makeUser({ roleName: 'EMPLOYEE', employeeId: emp });
+
+    await makeAsset({ departmentId: mine, companyCode: 'UBP' });
+    const uba = await makeAsset({ departmentId: ubaDept, companyCode: 'UBA' });
+    await makeAccounting(uba, { bookedCost: 999_999, accumulatedDepreciation: 0 });
+
+    const res = await dashboardService.overview(asRole(userId, 'EMPLOYEE'), {});
+
+    expect(res.byCompany.map((c) => c.companyCode)).toEqual(['UBP']);
+  });
+
+  // รหัสมั่วจากคนที่เลือกไม่ได้อยู่แล้ว ไม่ควรพังทั้งหน้า — ต่างจาก ADMIN ที่ต้องได้ 404
+  // (หลักเดียวกับ departmentId ของแผนกอื่นที่ถูกทิ้งเงียบ ๆ ไม่ใช่ 403)
+  test('EMPLOYEE ส่งรหัสบริษัทที่ไม่มีจริง → ไม่ 404 แต่ตกไปที่บริษัทตัวเอง', async () => {
+    const mine = await makeDepartment('แผนกของฉัน', 'UBP');
+    const emp = await makeEmployee({ departmentId: mine, companyCode: 'UBP' });
+    await setHrCompany(emp, 'UBP');
+    const userId = await makeUser({ roleName: 'EMPLOYEE', employeeId: emp });
+
+    const res = await dashboardService.overview(asRole(userId, 'EMPLOYEE'), {
+      companyCode: 'NOPE',
+    });
+
+    expect(res.scope.companyCode).toBe('UBP');
+  });
+
+  // ★ ลำดับนี้ห้ามสลับ — ข้อมูลจริง 2026-09-03: employee.departmentId ของ 391 จาก 404 คน
+  //   ชี้ไปแผนกของ UBA ทั้งที่คนเหล่านั้นสังกัด UBP/MIG (บั๊กเดิมที่ employee_company
+  //   ถูกสร้างมาแก้) เอาแผนกขึ้นก่อนเมื่อไหร่ คนเกือบทั้งบริษัทจะถูกล็อกเป็น UBA
+  test('สังกัดตาม HR ชนะบริษัทของแผนกที่ผูกไว้', async () => {
+    const ubaDept = await makeDepartment('แผนกของ UBA', 'UBA');
+    const emp = await makeEmployee({ departmentId: ubaDept, companyCode: 'UBA' });
+    await setHrCompany(emp, 'UBP');
+    const userId = await makeUser({ roleName: 'EMPLOYEE', employeeId: emp });
+
+    const res = await dashboardService.overview(asRole(userId, 'EMPLOYEE'), {});
+
+    expect(res.scope.companyCode).toBe('UBP');
+  });
+
+  // 199 จาก 404 แถวยังไม่มีค่าในคอลัมน์นั้น (วัด 2026-09-03) — ต้องยังบอกบริษัทได้
+  // ไม่ใช่ตกไปเป็น null แล้วกลายเป็น "เห็นทุกบริษัท" ซึ่งคือรูที่กำลังปิดอยู่พอดี
+  test('ไม่มีสังกัดตาม HR → ถอยไปใช้บริษัทของแผนก', async () => {
+    const mine = await makeDepartment('แผนกของฉัน', 'UBP');
+    // ไม่เรียก setHrCompany — employee.companyCode เป็น NULL ตามค่าเริ่มต้นของ factory
+    const emp = await makeEmployee({ departmentId: mine, companyCode: 'UBP' });
+    const userId = await makeUser({ roleName: 'EMPLOYEE', employeeId: emp });
+
+    const res = await dashboardService.overview(asRole(userId, 'EMPLOYEE'), {});
+
+    expect(res.scope.companyCode).toBe('UBP');
+    expect(res.scope.companyLocked).toBe(true);
+  });
+
+  test.each(['MANAGER', 'FINANCE', 'ADMIN'])('%s ไม่ถูกล็อกบริษัท', async (roleName) => {
+    const emp = await makeEmployee({ companyCode: 'UBP' });
+    await setHrCompany(emp, 'UBP');
+    const userId = await makeUser({ roleName, employeeId: emp });
+
+    await makeAsset({ companyCode: 'UBA' });
+    await makeAsset({ companyCode: 'UBP' });
+
+    const res = await dashboardService.overview(asRole(userId, roleName), {});
+
+    expect(res.scope.companyCode).toBeNull();
+    expect(res.scope.companyLocked).toBe(false);
+    expect(res.totals.assets).toBe(2);
+    // ยังเลือกบริษัทอื่นที่ไม่ใช่ของตัวเองได้ตามเดิม
+    const picked = await dashboardService.overview(asRole(userId, roleName), {
+      companyCode: 'UBA',
+    });
+    expect(picked.scope.companyCode).toBe('UBA');
+    expect(picked.totals.assets).toBe(1);
   });
 });
 
@@ -765,17 +921,20 @@ describe('อายุคงเหลือรายแผนก', () => {
     expect(bucket(res, '1–12 เดือน')).toBe(1);
   });
 
+  // แผนกชื่อเดียวกันสองบริษัทเป็นของจริง (55 ชื่อซ้ำกันข้ามบริษัทใน ams_db) — และตั้งแต่
+  // 0026 ชิ้นต้องอยู่แผนกของบริษัทตัวเอง จึงต้องเป็นสองแถวคนละ id ไม่ใช่แถวเดียวใช้ร่วม
   test('กรองบริษัทด้วยแล้วยังตัดกันถูก', async () => {
     const userId = await makeUser({ roleName: 'ADMIN' });
-    const dep = await makeDepartment('แผนก ก');
+    const depUba = await makeDepartment('แผนก ก');
+    const depUbp = await makeDepartment('แผนก ก', 'UBP');
 
-    const uba = await makeAsset({ departmentId: dep, companyCode: 'UBA' });
+    const uba = await makeAsset({ departmentId: depUba, companyCode: 'UBA' });
     await makeAccounting(uba, { usefulLifeMonths: 60, remainingLifeMonths: 10 });
-    const ubp = await makeAsset({ departmentId: dep, companyCode: 'UBP' });
+    const ubp = await makeAsset({ departmentId: depUbp, companyCode: 'UBP' });
     await makeAccounting(ubp, { usefulLifeMonths: 60, remainingLifeMonths: 10 });
 
     const res = await dashboardService.overview(asRole(userId, 'ADMIN'), {
-      departmentId: dep,
+      departmentId: depUbp,
       companyCode: 'UBP',
     });
 

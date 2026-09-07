@@ -99,7 +99,9 @@ describe('ข้อมูลประกอบที่คนหน้างา�
     const employeeId = await makeEmployee({ departmentId });
     const [sub] = await db
       .insert(assetSubLocation)
-      .values({ code: 'HQ-F2-201', locationId, floor: '2', room: '201' })
+      // room เก็บคำว่า "ห้อง" มาในค่าอยู่แล้ว — ของจริงใน sub_location เป็นแบบนี้
+      // (ตรงกับ fixture ของ asset-inventory / asset-pin-location ที่ใช้ 'ห้องบัญชี' / 'ห้อง A')
+      .values({ code: 'HQ-F2-201', locationId, floor: '2', room: 'ห้อง 201' })
       .returning();
     const [cat] = await db
       .insert(category)
@@ -116,6 +118,9 @@ describe('ข้อมูลประกอบที่คนหน้างา�
 
     const res = await assetService.findByAssetNumber('COM-100-05-002', TEST_COMPANY);
 
+    // ★ subLocationName() ต้องไม่เติมคำว่า "ห้อง " นำหน้าเอง — ค่าใน room มีคำนั้นอยู่แล้ว
+    //   เติมซ้ำเมื่อไหร่ได้ "ห้อง ห้อง 201" ซึ่งเป็นอาการที่เพิ่งถอด prefix ออกไปเพราะเจอของจริง
+    //   (assert นี้จึงเป็นด่านกันไม่ให้มีใครเติมกลับเข้ามา ไม่ใช่แค่เช็ครูปแบบเฉย ๆ)
     expect(res.subLocationName).toBe('ชั้น 2 / ห้อง 201');
     expect(res.departmentName).toBe('แผนกบัญชี');
     expect(res.categoryName).toBe('เครื่องใช้สำนักงาน');

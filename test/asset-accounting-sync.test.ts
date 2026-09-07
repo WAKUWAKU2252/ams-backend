@@ -12,21 +12,14 @@
 //   1. 0 ต้องเป็น 0 ไม่ใช่ NULL (ของที่ยังไม่เริ่มคิดค่าเสื่อม)
 //   2. รายการปรับปรุงที่ยังไม่รองรับ ต้องทำให้ค่าเสื่อมสะสมเป็น NULL ไม่ใช่เก็บเลขที่รู้ว่าต่ำกว่าจริง
 //   3. ต้องเขียนได้ตั้งแต่รอบแรกที่สินทรัพย์เข้าระบบ (FK ต้องการให้ asset มาก่อนในทรานแซกชันเดียวกัน)
-import { beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
 import { db } from '@intrastucture/db';
 import { asset, assetAccounting, assetLocation, category } from '@intrastucture/db/schema';
 import type { Tx } from '@modules/integrate/SAP/sync.types';
 import { resetDb, TEST_COMPANY } from './helpers/factory';
 
-// ปิดประตู SAP ก่อน import connector — เหตุผลเต็มอยู่ที่ asset-sync-po-flow.test.ts
-const realSapClient = await import('@intrastucture/sap/client');
-mock.module('@intrastucture/sap/client', () => ({
-  ...realSapClient,
-  sapQuery: async () => {
-    throw new Error('เทสต์พยายามคิวรี SAP จริง — apply() ไม่ควรแตะ SAP เลย');
-  },
-}));
+// ประตู SAP ปิดอยู่แล้วจาก test/setup.ts (preload) — เหตุผลเต็มอยู่ที่นั่น
 
 // connector เป็น factory ตั้งแต่ 0021 — ผูกกับบริษัทก่อนใช้
 const { makeAssetConnector } = await import('@modules/integrate/SAP/connectors/asset.connector');
@@ -76,7 +69,6 @@ const sapAsset = (over: Partial<LegacyAssetRow> = {}): LegacyAssetRow => ({
   acqDate: null,
   vendor: null,
   invoiceNo: null,
-  acqCost: null,
   // มาคนละ join กับชุด ITM8 ข้างล่าง (ACQ1) จึงไม่ได้อยู่ใน NO_ACCOUNTING — ค่าเริ่มต้น
   // คือ "ไม่มีรายการซื้อใน ACQ1" เทสต์ที่ต้องการทดสอบทางถอยกลับต้องส่งค่ามาเอง
   acquisitionPostedTotal: null,
@@ -149,8 +141,8 @@ describe('เขียนมูลค่าทางบัญชี', () => {
     await assetConnector.apply(
       tx,
       pull([
-        sapAsset({ ...a, invoiceNo: 1, acqCost: 5000, acqDate: new Date('2005-06-01') }),
-        sapAsset({ ...a, invoiceNo: 2, acqCost: 7871.03, acqDate: new Date('2005-07-01') }),
+        sapAsset({ ...a, invoiceNo: 1, acqDate: new Date('2005-06-01') }),
+        sapAsset({ ...a, invoiceNo: 2, acqDate: new Date('2005-07-01') }),
       ]),
     );
 
