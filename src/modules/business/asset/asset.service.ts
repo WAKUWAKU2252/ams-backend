@@ -5,6 +5,7 @@ import {
   eq,
   ilike,
   inArray,
+  isNotNull,
   isNull,
   max,
   notInArray,
@@ -34,7 +35,12 @@ import { isUniqueViolation } from '@common/pg-error';
 import { declaredMap } from '@modules/business/asset-request/asset-request-line.service';
 import * as presence from '@modules/business/asset-request/presence.service';
 import { documentPersonName, employeeName, subLocationName } from '@modules/business/master/master.service';
-import { createAssetBody, updateAssetBody } from './asset.schema';
+import {
+  createAssetBody,
+  updateAssetBody,
+  updateAssetImageBody,
+  updateAssetLocationBody,
+} from './asset.schema';
 import { paginate, type Paginated } from '@common/pagination';
 import type {
   AssetRow,
@@ -49,8 +55,11 @@ import type {
   MyAssetAccounting,
   MyAssetsResponse,
   AssetByNumberDetail,
+  AssetNumberMatch,
   InventoryItem,
   InventoryListInput,
+  RoomAsset,
+  RoomAssetsResponse,
 } from './asset.types';
 
 // เผื่อเศษจากการหารราคาแบ่งชิ้น (10,000 ÷ 3) — ต่างระดับสตางค์ไม่ถือว่าเกิน
@@ -91,6 +100,11 @@ async function assertMasterUsable(input: MasterRefInput): Promise<void> {
   if (input.locationId !== undefined) {
     if (!location) throw new BadRequestError(`ไม่พบสถานที่ id ${input.locationId}`);
     if (!location.isActive) throw new BadRequestError(`สถานที่ "${location.name}" ถูกปิดใช้งานแล้ว`);
+    // ตึกของผัง (0022) ไม่ใช่สถานที่ทางบัญชี — dropdown กรองออกให้แล้ว (findLocations) แต่
+    // API เป็นทางเข้าที่สอง ปล่อยผ่านเมื่อไหร่ยอดจะไปโผล่ผิดสถานที่ในรายงานบัญชีแบบเงียบ ๆ
+    if (location.isPlanArea) {
+      throw new BadRequestError(`"${location.name}" เป็นพื้นที่บนผัง ไม่ใช่สถานที่ทางบัญชี`);
+    }
   }
 
   if (input.subLocationId == null) return;
@@ -101,11 +115,73 @@ async function assertMasterUsable(input: MasterRefInput): Promise<void> {
   if (!sub) throw new BadRequestError(`ไม่พบตำแหน่งย่อย id ${input.subLocationId}`);
   if (!sub.isActive) throw new BadRequestError('ตำแหน่งย่อยที่เลือกถูกปิดใช้งานแล้ว');
 
-  // ตำแหน่งย่อยต้องอยู่ใต้สถานที่ที่เลือก — ไม่เช็คแล้ว "ชั้น 2 ห้อง 201 ของสำนักงานใหญ่"
-  // จะไปโผล่ใต้ "โรงงาน 1" ได้ ซึ่ง FK สองตัวแยกกันจับไม่ได้เลย
-  if (input.locationId !== undefined && sub.locationId !== input.locationId) {
-    throw new BadRequestError('ตำแหน่งย่อยที่เลือกไม่ได้อยู่ในสถานที่นี้');
+  // ── เคยเช็คว่า sub.locationId ต้องเท่ากับ input.locationId — ถอดออกใน 0023 ──────
+  // เช็คตัวนั้นตั้งอยู่บนสมมติฐานว่า location กับ subLocation เป็นแกนเดียวกัน ซึ่งเลิกจริง
+  // ตั้งแต่ 0022: asset.locationId = สถานที่ "ทางบัญชี" ของ SAP ส่วน sub.locationId =
+  // "ตึก" บนผัง สองค่านี้จึงไม่มีวันเท่ากันโดยตั้งใจ คงไว้ = บันทึกไม่ผ่านทุกครั้งที่เลือกห้อง
+  //
+  // ⚠️ ที่เสียไปคือ "ห้องของตึกอื่นถูกจับคู่กับสถานที่บัญชีไหนก็ได้" ซึ่งยอมรับได้ เพราะ
+  //    สองแกนนี้ตอบคนละคำถาม (งบของใคร / ของตั้งอยู่ตรงไหน) และไม่มีกติกาทางธุรกิจว่า
+  //    ต้องสอดคล้องกัน — ตึกที่ของตั้งอยู่ derive จาก subLocationId ได้เสมอ ไม่ต้องเดา
+}
+
+/**
+ * กติกาของหมุดตำแหน่ง — เช็คก่อนถึง DB เพื่อให้ได้ข้อความที่บอกสาเหตุ
+ *
+ * CHECK ที่ DB (ck_asset_pos_pair / ck_asset_pos_needs_sub_location) จับสองเคสนี้อยู่แล้ว
+ * แต่ error ของ constraint อ่านไม่รู้เรื่องสำหรับคนกรอกฟอร์ม — ด่านนี้แปลให้เป็นภาษาคน
+ * ไม่ได้แทนที่ CHECK: สคริปต์/job ที่เขียน DB ตรงยังต้องโดน CHECK เหมือนเดิม
+ */
+function assertPinUsable(posX: number | null | undefined, posY: number | null | undefined, subLocationId: number | null | undefined): void {
+  const hasX = posX != null;
+  const hasY = posY != null;
+  if (hasX !== hasY) {
+    throw new BadRequestError('หมุดตำแหน่งต้องมีทั้ง posX และ posY — พิกัดข้างเดียววาดไม่ได้');
   }
+  if (hasX && subLocationId == null) {
+    throw new BadRequestError('ปักหมุดตำแหน่งได้ต้องเลือกห้องก่อน');
+  }
+}
+
+/**
+ * สถานที่นอกผัง (outPlan) ห้ามมีห้อง/หมุดติดมาด้วย
+ *
+ * ผังที่ระบบมีเป็นผังของไซต์นี้ ห้องทุกห้องในนั้นเป็นห้องที่นี่ — ของที่ถูกส่งไปต่างประเทศ
+ * หรือสาขาอื่นแล้วยังผูกอยู่กับห้องบนผังนี้คือข้อมูลที่ผิดตั้งแต่ต้น และหมุดที่ได้จะชี้จุด
+ * บนผังของอีกที่หนึ่งโดยไม่มีอะไรฟ้อง (CHECK ที่ DB จับไม่ได้ — พิกัดยังอยู่ในช่วง 0–1
+ * และยังมี subLocationId อยู่ครบ)
+ *
+ * ── ★ ด่านนี้ตรวจ "ทางเดียว" โดยตั้งใจ: ห้ามมี ไม่ใช่บังคับให้มี
+ *
+ * กฎ "ของใหม่ต้องมีห้อง+หมุดครบ" อยู่ที่ createAssetBody (ประตู) มาตลอด ไม่เคยอยู่ในชั้น
+ * service — ชั้นนี้ตั้งใจให้หลวมเพื่อให้สคริปต์/ของเก่า/เส้นทางอื่นสร้างแถวได้โดยไม่ถูกล็อก
+ * (เทสต์เขียนกำกับไว้ตรง ๆ: "เลือกห้องเฉย ๆ ไม่ปักหมุดก็บันทึกได้ (ไม่บังคับ)")
+ *
+ * เอากฎนั้นย้ายเข้ามาที่นี่เมื่อไหร่ = เปลี่ยนสัญญาของ service ทั้งตัว ไม่ใช่แค่เพิ่มฟีเจอร์
+ *
+ * ⚠️ ผลที่ตามมาซึ่งต้องรู้: ตั้งแต่ createAssetBody เปลี่ยนสามช่องนั้นเป็น optional (จำเป็น
+ *    เพื่อให้สถานที่นอกผังบันทึกได้) ประตูจึงไม่ได้บังคับ "ต้องมีห้อง+หมุด" อีกต่อไป
+ *    ตอนนี้ตัวบังคับเหลือฝั่งฟอร์มอย่างเดียว (missingForCreate/canSave ใน AppAssetFormDialog)
+ *    ถ้าจะปิดช่องนี้ที่ API ด้วย ต้องทำ createAssetBody เป็น union สองรูป
+ *    (มีครบสามช่อง | ไม่มีเลยสักช่อง) ซึ่งเป็นการเปลี่ยนรูป schema ที่ควรตัดสินใจแยก
+ */
+async function assertPlacementUsable(input: {
+  locationId: number;
+  subLocationId?: number | null;
+  posX?: number | null;
+  posY?: number | null;
+}): Promise<void> {
+  if (input.subLocationId == null && input.posX == null && input.posY == null) return;
+
+  const location = await db.query.assetLocation.findFirst({
+    where: eq(assetLocation.id, input.locationId),
+  });
+  // ไม่มีแถว = assertMasterUsable ที่เรียกก่อนหน้าจะโยนข้อความที่ตรงกว่าให้เอง ไม่ทับที่นี่
+  if (!location?.outPlan) return;
+
+  throw new BadRequestError(
+    `"${location.name}" เป็นสถานที่นอกผังของไซต์นี้ จึงระบุห้องหรือปักหมุดบนผังไม่ได้`,
+  );
 }
 
 /** รูปที่แนบต้องเป็นไฟล์รูปจริง ยังไม่ถูกลบ และยังไม่มีชิ้นอื่นใช้อยู่ */
@@ -224,6 +300,9 @@ export async function create(body: CreateBody, userId: number): Promise<AssetRow
 
   // [Q4] [Q5] ข้อมูลอ้างอิงและรูป
   await assertMasterUsable(body);
+  assertPinUsable(body.posX, body.posY, body.subLocationId);
+  // ห้อง/หมุดจะบังคับหรือห้ามมี ขึ้นกับว่าสถานที่ที่เลือกอยู่ในผังของไซต์นี้ไหม
+  await assertPlacementUsable(body);
   if (body.imageId) await assertImageUsable(body.imageId);
 
   // เลขชิ้น: client ส่งเลขช่องที่ตัวเองกรอกมา (ตรงกับที่เห็นบนฟอร์ม) ไม่ส่งมาก็ต่อท้ายให้
@@ -267,6 +346,8 @@ export async function create(body: CreateBody, userId: number): Promise<AssetRow
       // categoryId/uom ไม่เซ็ตตรงนี้ — ปล่อยเป็น NULL รอ sync ที่ map จาก OITM มาเติม (0007/0011)
       locationId: body.locationId,
       subLocationId: body.subLocationId,
+      posX: body.posX,
+      posY: body.posY,
       departmentId: body.departmentId,
       employeeId: body.employeeId,
       warrantyStartDate: body.warrantyStartDate,
@@ -312,7 +393,10 @@ export async function findOneOrFail(id: number) {
       grpoLine: { with: { grpo: true, poItem: true } },
       category: true,
       location: true,
-      subLocation: true,
+      // ดึงตึกของห้องมาด้วย — ฟอร์มต้องโชว์ "ตึก · ชั้น · ห้อง" ตอนเปิดแก้ของเดิม และตึก
+      // เป็นค่าที่ derive จากห้องเท่านั้น (0022 ไม่ได้เก็บซ้ำบน asset) ถ้าไม่ join มาให้
+      // ฝั่งจอต้องไปยิง /master/floor-plans มาไล่หาเองทั้งชุดเพื่ออ่านชื่อเดียว
+      subLocation: { with: { location: true } },
       employee: true,
       image: true,
     },
@@ -412,6 +496,9 @@ export async function findSlotsByRequest(requestId: number): Promise<AssetSlotsR
           // ดึงมาพร้อมรอบนี้แทนที่จะให้ frontend ยิง GET /assets/:id ทีละชิ้น (ใบละหลายสิบชิ้น)
           employee: true,
           department: true,
+          // หมวด: ใช้เลือกไอคอนของหมุดบนผังในกล่องรายชิ้น (categoryIcon ฝั่ง frontend)
+          // ไม่ได้ใช้แสดงเป็นข้อความ — หน้านี้ไม่มีช่องหมวด
+          category: true,
         },
         orderBy: (a, { asc }) => [asc(a.unitNo)],
       })
@@ -423,7 +510,15 @@ export async function findSlotsByRequest(requestId: number): Promise<AssetSlotsR
   const actorIds = [
     ...new Set(
       registeredRows.flatMap((a) =>
-        [a.request?.approvedBy, a.request?.rejectedBy, a.rejectedBy, a.cancelledBy, a.registeredBy].filter(
+        [
+          a.request?.approvedBy,
+          a.request?.rejectedBy,
+          // คนเปิดใบ — ต้องมีชื่อไปโชว์ให้คนที่เห็นชิ้นนี้จากใบอื่นรู้ว่าใบนี้เป็นของใคร
+          a.request?.createdBy,
+          a.rejectedBy,
+          a.cancelledBy,
+          a.registeredBy,
+        ].filter(
           (id): id is number => id != null,
         ),
       ),
@@ -582,6 +677,11 @@ export async function findSlotsByRequest(requestId: number): Promise<AssetSlotsR
             // ชิ้นนี้เป็นของใบไหน — ใบอื่นแปลว่าอ่านได้อย่างเดียว (แก้/ลบต้องไปทำที่ใบเจ้าของ)
             // และการ์ดแจ้งอนุมัติของใบนี้ต้องไม่นับรวมเข้าไปด้วย
             requestId: existing.requestId,
+            // ใครเปิดใบนั้น — คนที่มาจากใบอื่นต้องรู้ว่าจะไปคุยกับใคร/เปิดใบไหนต่อ
+            requestCreatedByName:
+              existing.request?.createdBy != null
+                ? (actorNames.get(existing.request.createdBy) ?? null)
+                : null,
             serialNumber: existing.serialNumber,
             acquisitionCost: existing.acquisitionCost, // ราคาจริงต่อชิ้น (ชิ้นเกิน = 0 ตาม default)
             // lifecycle จริงของชิ้น: DRAFT = ยังไม่เข้า SAP (badge "requested") / REGISTERED = ลง SAP แล้ว
@@ -596,6 +696,17 @@ export async function findSlotsByRequest(requestId: number): Promise<AssetSlotsR
             // ใช้ subLocationName() ตัวเดียวกับ dropdown ในฟอร์ม (ตารางไม่มีคอลัมน์ name
             // มีแต่ floor/room/remark) — คนละสูตรเมื่อไหร่ ผู้อนุมัติจะเห็นคนละข้อความกับที่ผู้ใช้เลือก
             subLocationName: existing.subLocation ? subLocationName(existing.subLocation) : null,
+            // ── ที่ตั้งแบบชี้บนผังได้ — กล่องรายชิ้นของบัญชีวาดผังจากสี่ตัวนี้
+            //
+            // planKey อ่านจากห้อง ไม่ได้เก็บซ้ำบน asset (ห้องย้ายผังได้ ค่าที่ก๊อปไว้จะโกหก)
+            // — null ตรงนี้จึงแปลว่า "ห้องนี้ยังไม่ถูกตีขอบเขตลงผัง" ซึ่งฝั่งจอต้องบอกคนละ
+            // ข้อความกับ "ไม่ได้ระบุห้อง" เพราะสองอย่างนี้ไปแก้คนละที่
+            locationOutPlan: existing.location?.outPlan ?? false,
+            subLocationId: existing.subLocationId,
+            planKey: existing.subLocation?.planKey ?? null,
+            posX: existing.posX,
+            posY: existing.posY,
+            categoryName: existing.category?.name ?? null,
             // employeeName() ตัวเดียวกับที่ dropdown ในฟอร์มใช้ — คนละสูตรเมื่อไหร่ ชื่อที่บัญชี
             // เห็นจะไม่ตรงกับที่ผู้ขอเลือกไว้ (เหตุผลเดียวกับ subLocationName ข้างบน)
             employeeName: existing.employee ? employeeName(existing.employee) : null,
@@ -705,6 +816,41 @@ export async function update(id: number, body: UpdateBody, userId: number): Prom
     // ถ้าแก้เฉพาะ subLocation ต้องเทียบกับ location เดิมที่ยังใช้อยู่ ไม่ใช่ปล่อยผ่าน
     locationId: body.locationId ?? current.locationId,
   });
+
+  // ── หมุดตำแหน่ง: ย้ายห้องแล้วต้องล้างหมุดเดิมเสมอ ──────────────────────────
+  // พิกัดเป็นสัดส่วนของ "ผังชั้นที่ห้องเดิมอยู่" ย้ายไปห้องอื่นแล้วตัวเลขชุดเดิมยังผ่าน
+  // CHECK ทุกข้อ (อยู่ในช่วง 0–1 และยังมี subLocationId) แต่มันชี้จุดผิดที่สนิท —
+  // DB จับให้ไม่ได้ ต้องล้างที่นี่ ตามที่คอมเมนต์ของคอลัมน์สั่งไว้ตั้งแต่ 0007
+  //
+  // ถ้าผู้ใช้ปักหมุดใหม่มาพร้อมกับการย้ายห้อง (กล่องเลือกสถานที่ส่งมาครบชุด) ให้ใช้ของใหม่
+  // ไม่ต้องล้าง — เช็คจาก "ส่ง posX มาด้วยไหม" ไม่ใช่จากค่าของมัน (null = สั่งถอนหมุด)
+  const movedRoom =
+    body.subLocationId !== undefined && body.subLocationId !== current.subLocationId;
+  const clearPin = movedRoom && body.posX === undefined && body.posY === undefined;
+
+  // ★ ต้องเทียบกับ undefined ไม่ใช่ ?? — null เป็นค่าที่ "สั่งให้ลบ" ซึ่ง ?? กลืนทิ้งแล้ว
+  //   ถอยไปใช้ค่าเดิม ทำให้ด่านนี้ตรวจสถานะเก่าแทนสถานะที่กำลังจะเขียนจริง
+  //   (เคสที่หลุด: ล้างห้องแต่ยังส่งหมุดมา — ต้องถูกปฏิเสธที่นี่พร้อมข้อความที่คนอ่านรู้เรื่อง
+  //    ไม่ใช่ปล่อยไปตกที่ ck_asset_pos_needs_sub_location แล้วได้ error ของ constraint)
+  const keep = <T>(sent: T | undefined, currentValue: T): T => (sent !== undefined ? sent : currentValue);
+  const nextSubLocationId = keep(body.subLocationId, current.subLocationId);
+  const nextPosX = clearPin ? null : keep(body.posX, current.posX);
+  const nextPosY = clearPin ? null : keep(body.posY, current.posY);
+
+  assertPinUsable(nextPosX, nextPosY, nextSubLocationId);
+
+  // ★ ต้องตรวจทาง update ด้วย ไม่ใช่เฉพาะ create — ย้ายชิ้นที่มีห้อง+หมุดอยู่แล้วไปเป็น
+  //   สถานที่นอกผังคือทางที่ข้อมูลผิดเข้ามาได้ง่ายที่สุด (ส่ง locationId มาตัวเดียวก็พอ)
+  //   และ CHECK ที่ DB จับไม่ได้: พิกัดยังอยู่ในช่วง 0–1 และยังมี subLocationId ครบทุกข้อ
+  //
+  // ★ เทียบกับ "ค่าที่จะถูกเขียนจริง" ไม่ใช่เฉพาะที่ส่งมา — ไม่งั้นคำขอที่ส่งแต่ locationId
+  //   จะผ่านฉลุยเพราะ body ไม่มีห้อง/หมุดติดมา ทั้งที่ของเดิมในแถวยังค้างอยู่
+  await assertPlacementUsable({
+    locationId: keep(body.locationId, current.locationId),
+    subLocationId: nextSubLocationId,
+    posX: nextPosX,
+    posY: nextPosY,
+  });
   if (body.imageId) await assertImageUsable(body.imageId, id);
 
   // ย้ายรอบรับของ: ต้องเป็นรอบของ PO line เดิม (composite FK กันไว้อีกชั้น) และรอบปลายทางต้องยังมีที่ว่าง
@@ -748,6 +894,9 @@ export async function update(id: number, body: UpdateBody, userId: number): Prom
       .update(asset)
       .set({
         ...body,
+        // ย้ายห้องโดยไม่ได้ปักหมุดใหม่มาด้วย = ถอนหมุดเก่าทิ้ง (ดูเหตุผลข้างบน)
+        // วางหลัง ...body เพื่อให้ทับค่าที่ spread มา แต่ตัวมันว่างเมื่อผู้ใช้ส่งหมุดใหม่มา
+        ...(clearPin ? { posX: null, posY: null } : {}),
         // ★ แก้ข้อมูลแล้ว = ส่งกลับเข้าคิวบัญชีอีกครั้ง สถานะตีกลับรายชิ้นจึงต้องหายไปเอง
         //   ไม่มีปุ่ม "ส่งกลับ" แยกโดยตั้งใจ — ปุ่มนั้นจะกลายเป็นขั้นที่ผู้ใช้ลืมกดแล้วชิ้นค้าง
         //   อยู่ในสถานะ Rejected ตลอดกาลทั้งที่แก้ไปแล้ว (บัญชีก็ไม่รู้ว่าต้องมาดูอีกรอบ)
@@ -787,6 +936,121 @@ export async function update(id: number, body: UpdateBody, userId: number): Prom
     });
   }
   return row;
+}
+
+/**
+ * ย้ายที่ตั้งบนผังของชิ้นที่ "ลงทะเบียนแล้ว" — เส้นเดียวที่ข้ามด่าน REGISTERED ของ update()
+ *
+ * ── ทำไมต้องมีเส้นนี้ ────────────────────────────────────────────────────────
+ *
+ * update() ปฏิเสธ REGISTERED ทั้งก้อน ซึ่งถูกต้องสำหรับของที่ SAP เป็นเจ้าของ แต่ผลข้างเคียง
+ * คือ "ของที่อยู่ในทะเบียนแล้วไม่มีทางบอกได้เลยว่าตั้งอยู่ห้องไหน" — วัดเมื่อ 2026-09-07:
+ * REGISTERED 3,518 ชิ้น มี 3,491 ชิ้น (99.2%) ที่ subLocationId ยังเป็น NULL และไม่มี
+ * ทางเดินไหนในระบบพาไปเติมได้ (กล่องกรอกในใบคำขอแตะได้เฉพาะของที่ยังเป็น DRAFT)
+ *
+ * สามช่องนี้ AMS เป็นเจ้าของฝ่ายเดียว — เหตุผลเต็มอยู่ที่ updateAssetLocationBody
+ *
+ * ── ขอบเขตแคบโดยตั้งใจ: REGISTERED เท่านั้น ──────────────────────────────────
+ *
+ * ★ DRAFT ต้องไม่เข้าทางนี้ ให้ไปทาง update() เหมือนเดิม
+ *
+ * ของที่ยังเป็น DRAFT มีกติกาของ "ใบ" คุมอยู่ (แก้ได้เฉพาะตอนใบเป็น DRAFT/REJECTED หรือ
+ * เป็นชิ้นที่บัญชีตีกลับ) ถ้าเส้นนี้รับ DRAFT ด้วย มันจะกลายเป็นประตูหลังที่ย้ายที่ตั้งของ
+ * ชิ้นในใบที่บัญชีกำลังนั่งออกเลขอยู่ได้ — เป็นการปลดกติกานั้นโดยไม่ได้ตั้งใจ
+ *
+ * ★ ไม่ยิง presence.notifyStatus ต่างจาก update()
+ *
+ * ก้อนนั้นมีไว้บอกบัญชีว่า "ชิ้นที่ตีกลับถูกแก้แล้ว กลับเข้าคิวออกเลข" ซึ่งเป็นเรื่องของ
+ * ชิ้นที่ยังไม่ออกเลข — ที่นี่รับเฉพาะชิ้นที่ออกเลขไปแล้ว ใบของมันปิดไปนานแล้วและไม่มี
+ * ห้อง presence ไหนเปิดค้างอยู่ (ส่วน SAP_LEGACY 3,507 ชิ้นไม่มีใบมาแต่ต้น)
+ */
+export async function updateLocation(
+  id: number,
+  body: typeof updateAssetLocationBody.static,
+  userId: number,
+): Promise<AssetRow> {
+  const current = await db.query.asset.findFirst({
+    where: and(eq(asset.id, id), isNull(asset.deletedAt)),
+  });
+  if (!current) throw new NotFoundError(`Asset ${id}`);
+
+  if (current.lifecycle !== 'REGISTERED') {
+    throw new BadRequestError(
+      'ชิ้นนี้ยังไม่ได้ลงทะเบียน — แก้ที่ตั้งได้ที่กล่องกรอกรายละเอียดในใบคำขอ',
+    );
+  }
+
+  // ★ CANCELLED ตกด่านข้างบนไปแล้ว (lifecycle เป็นคนละค่า) — ไม่ต้องเช็คซ้ำ
+  //   แต่เขียนไว้ให้รู้ว่าคิดถึงแล้ว ไม่ใช่หลุด: ของที่ปิดถาวรไม่ควรย้ายที่ตั้งได้
+
+  // ห้องต้องมีจริงและยังเปิดใช้งาน — FK จับ "ไม่มีแถว" ได้ แต่จับ "ถูกปิดใช้งาน" ไม่ได้
+  await assertMasterUsable({ locationId: current.locationId, subLocationId: body.subLocationId });
+  // สถานที่ทางบัญชีที่อยู่นอกผัง (ต่างประเทศ/สาขาอื่น) ปักหมุดบนผังไซต์นี้ไม่ได้
+  await assertPlacementUsable({
+    locationId: current.locationId,
+    subLocationId: body.subLocationId,
+    posX: body.posX,
+    posY: body.posY,
+  });
+  // ครบสามช่องอยู่แล้วโดยชนิดข้อมูล — เรียกไว้เพื่อให้กติกาหมุดมีที่ตรวจที่เดียวเหมือนทางอื่น
+  assertPinUsable(body.posX, body.posY, body.subLocationId);
+
+  return requireRow(
+    await db
+      .update(asset)
+      .set({
+        subLocationId: body.subLocationId,
+        posX: body.posX,
+        posY: body.posY,
+        updatedBy: userId,
+        updatedAt: sqlNow(),
+      })
+      .where(eq(asset.id, id))
+      .returning(),
+    `update asset location ${id}`,
+  );
+}
+
+/**
+ * เปลี่ยนรูปของชิ้นที่ "ลงทะเบียนแล้ว" — คู่แฝดของ updateLocation()
+ *
+ * ★ ขอบเขตเดียวกันเป๊ะ: REGISTERED เท่านั้น เหตุผลเต็มอยู่ที่ updateLocation
+ *   (DRAFT ไปทาง update() ซึ่งมีกติกาของ "ใบ" คุมอยู่ เส้นนี้ต้องไม่กลายเป็นประตูหลัง)
+ *
+ * ★ ไม่ลบรูปเก่าทิ้งเอง — cleanupOrphans กวาดให้ใน 24 ชม.
+ *
+ * รูปเก่าจะไม่มีใครชี้ถึงทันทีที่ UPDATE นี้ผ่าน ซึ่งตรงกับนิยาม "กำพร้า" ของ cleanupOrphans
+ * (มันเช็ค notExists บน asset.imageId พอดี) — ลบเองตรงนี้แปลว่าถ้า UPDATE ล้มทีหลัง
+ * ด้วยเหตุอะไรก็ตาม รูปเดิมจะหายไปแล้วโดยที่แถวยังชี้ของเก่าอยู่ ปล่อยให้ตัวกวาดทำ
+ * ปลอดภัยกว่าและเป็นทางเดียวกับที่ฟอร์มลงทะเบียนใช้อยู่แล้ว
+ */
+export async function updateImage(
+  id: number,
+  body: typeof updateAssetImageBody.static,
+  userId: number,
+): Promise<AssetRow> {
+  const current = await db.query.asset.findFirst({
+    where: and(eq(asset.id, id), isNull(asset.deletedAt)),
+  });
+  if (!current) throw new NotFoundError(`Asset ${id}`);
+
+  if (current.lifecycle !== 'REGISTERED') {
+    throw new BadRequestError(
+      'ชิ้นนี้ยังไม่ได้ลงทะเบียน — แก้รูปได้ที่กล่องกรอกรายละเอียดในใบคำขอ',
+    );
+  }
+
+  // ต้องเป็นไฟล์รูปจริง ยังไม่ถูกลบ และยังไม่มีชิ้นอื่นใช้อยู่ (ตัวเดิม ใช้ร่วมกับ create/update)
+  await assertImageUsable(body.imageId, id);
+
+  return requireRow(
+    await db
+      .update(asset)
+      .set({ imageId: body.imageId, updatedBy: userId, updatedAt: sqlNow() })
+      .where(eq(asset.id, id))
+      .returning(),
+    `update asset image ${id}`,
+  );
 }
 
 export async function softDelete(id: number, userId: number): Promise<DeleteAssetResult> {
@@ -1029,29 +1293,117 @@ export async function findByAssetNumber(
     categoryName: row.category?.name ?? null,
     locationName: row.location.name,
     subLocationName: row.subLocation ? subLocationName(row.subLocation) : null,
+    // ที่ตั้งแบบชี้บนผังได้ — relation subLocation ถูกดึงมาอยู่แล้วข้างบน ไม่มี query เพิ่ม
+    locationOutPlan: row.location.outPlan,
+    subLocationId: row.subLocation?.id ?? null,
+    planKey: row.subLocation?.planKey ?? null,
+    floor: row.subLocation?.floor ?? null,
+    posX: row.posX,
+    posY: row.posY,
     departmentName: row.department?.name ?? null,
     holderName: row.employee ? employeeName(row.employee) : null,
+    sapCreatedDate: row.sapCreatedDate,
     acquisitionDate: row.acquisitionDate,
     acquisitionCost: row.acquisitionCost,
     warrantyStartDate: row.warrantyStartDate,
     warrantyEndDate: row.warrantyEndDate,
     accounting: toMyAssetAccounting(accounting ?? null),
+    companyCode: row.companyCode,
+  };
+}
+export async function resolveAssetNumber(assetNumber: string): Promise<AssetNumberMatch[]> {
+  const number = assetNumber.trim();
+  if (!number) throw new BadRequestError('ต้องระบุเลขสินทรัพย์');
+
+  return db
+    .selectDistinct({ companyCode: asset.companyCode })
+    .from(asset)
+    .where(and(eq(asset.assetNumber, number), isNull(asset.deletedAt)))
+    .orderBy(asc(asset.companyCode));
+}
+
+const ROOM_PAGE_SIZE = 50;
+
+export async function findByRoom(
+  subLocationId: number,
+  input: { page: number } = { page: 1 },
+): Promise<RoomAssetsResponse> {
+  const page = Math.max(1, input.page);
+  const offset = (page - 1) * ROOM_PAGE_SIZE;
+
+  // ไม่มี ne(CANCELLED) แล้ว — eq(REGISTERED) ครอบให้อยู่แล้ว การมีทั้งคู่ทำให้คนอ่าน
+  // เข้าใจว่าเงื่อนไขนี้ปล่อย DRAFT ผ่าน (ซึ่งเป็นที่มาของ docstring ที่เขียนผิดข้างบน)
+  const where = and(
+    eq(asset.subLocationId, subLocationId),
+    eq(asset.lifecycle, 'REGISTERED'),
+    isNull(asset.deletedAt),
+  );
+
+  const [rows, totalResult] = await Promise.all([
+    db
+      .select({
+        id: asset.id,
+        companyCode: asset.companyCode,
+        assetNumber: asset.assetNumber,
+        description: asset.description,
+        serialNumber: asset.serialNumber,
+        imageId: asset.imageId,
+        status: asset.status,
+        posX: asset.posX,
+        posY: asset.posY,
+        categoryName: category.name,
+        departmentName: department.name,
+        holder: {
+          id: employee.id,
+          firstName: employee.firstName,
+          lastName: employee.lastName,
+          firstNameEn: employee.firstNameEn,
+          lastNameEn: employee.lastNameEn,
+          empId: employee.empId,
+        },
+      })
+      .from(asset)
+      .leftJoin(category, eq(category.id, asset.categoryId))
+      .leftJoin(department, eq(department.id, asset.departmentId))
+      .leftJoin(employee, eq(employee.id, asset.employeeId))
+      .where(where)
+      // ของที่ปักหมุดไว้แล้วขึ้นก่อน — คนเปิดหน้านี้มาหาของบนผัง ชิ้นที่ชี้ตำแหน่งได้มีค่ากว่า
+      // ปิดท้ายด้วย id เสมอ กันลำดับสลับเองเมื่อคอลัมน์ที่เรียงมีค่าเท่ากัน
+      // (สำคัญกว่าเดิมตั้งแต่แบ่งหน้า: ลำดับที่ไม่คงที่ = ชิ้นเดิมโผล่ซ้ำสองหน้า
+      //  ส่วนอีกชิ้นหายไปเลย โดยไม่มีอะไรฟ้อง)
+      .orderBy(asc(asset.posX), asc(asset.assetNumber), asc(asset.id))
+      .limit(ROOM_PAGE_SIZE)
+      .offset(offset),
+    db.select({ value: count() }).from(asset).where(where),
+  ]);
+
+  const total = requireScalar(totalResult, `count asset ในห้อง ${subLocationId}`);
+
+  return {
+    total,
+    page,
+    pageSize: ROOM_PAGE_SIZE,
+    // นับจาก offset จริง ไม่ใช่จากจำนวนที่หน้าจอสะสมไว้ (ดู RoomAssetsResponse.hasMore)
+    hasMore: offset + rows.length < total,
+    items: rows.map(
+      (r): RoomAsset => ({
+        id: r.id,
+        companyCode: r.companyCode,
+        assetNumber: r.assetNumber,
+        description: r.description,
+        serialNumber: r.serialNumber,
+        imageId: r.imageId,
+        categoryName: r.categoryName,
+        departmentName: r.departmentName,
+        holderName: r.holder?.id ? employeeName(r.holder) : null,
+        status: r.status,
+        posX: r.posX,
+        posY: r.posY,
+      }),
+    ),
   };
 }
 
-/**
- * ═══ หน้า Asset Inventory — ทะเบียนสินทรัพย์ทั้งบริษัท ═══
- *
- * ต่างจาก findMine ตรงที่ **ไม่จำกัดขอบเขตตามคนที่ล็อกอิน** — ทุก role เห็นทุกชิ้น
- * ตั้งใจ ไม่ใช่ลืมใส่: หน้านี้ตอบคำถาม "ของชิ้นนี้อยู่ไหน ใครดูแล" ซึ่งคนที่ตามหาเครื่อง
- * มักไม่ใช่คนแผนกเดียวกับที่ของสังกัดอยู่ (ช่างซ่อม/คนตรวจนับ/คนยืมข้ามแผนก)
- * ข้อมูลชุดนี้เป็นชุดเดียวกับที่ปล่อยให้คนสแกน QR เห็นอยู่แล้ว (ดู findByAssetNumber)
- *
- * แสดงเฉพาะ lifecycle = 'REGISTERED' ที่ยังไม่ถูกลบ:
- *   - DRAFT ยังไม่มีเลขสินทรัพย์ จึงไม่มีอะไรให้ค้นและกดเข้าไปดูไม่ได้ (หน้ารายละเอียด
- *     ใช้เลขเป็นกุญแจ) ของที่ยังไม่ออกเลขมีหน้าของตัวเองอยู่แล้วที่ Asset Request
- *   - CANCELLED บัญชีปิดถาวรแล้วว่าจะไม่เป็นสินทรัพย์
- */
 export async function findInventory(input: InventoryListInput): Promise<Paginated<InventoryItem>> {
   const { page, limit } = input;
   const search = input.search?.trim();
@@ -1081,6 +1433,9 @@ export async function findInventory(input: InventoryListInput): Promise<Paginate
     input.departmentId ? eq(asset.departmentId, input.departmentId) : undefined,
     input.companyCode ? eq(asset.companyCode, input.companyCode) : undefined,
     input.locationId ? eq(asset.locationId, input.locationId) : undefined,
+    // ผู้ถือครอง — เทียบที่ asset.employeeId ตรง ๆ ไม่ต้องพึ่ง employee ที่ LEFT JOIN ไว้
+    // (คิวรีนับข้างล่างไม่ได้ join ตารางนั้นด้วยซ้ำ เหตุผลเดียวกับ located)
+    input.employeeId ? eq(asset.employeeId, input.employeeId) : undefined,
     input.status ? eq(asset.status, input.status) : undefined,
     input.fiscalYear ? eq(assetAccounting.fiscalYear, input.fiscalYear) : undefined,
     input.minNetBookValue === undefined
@@ -1089,8 +1444,46 @@ export async function findInventory(input: InventoryListInput): Promise<Paginate
     input.maxNetBookValue === undefined
       ? undefined
       : sql`${netBookValue} <= ${input.maxNetBookValue}`,
+    // เฉพาะชิ้นที่รู้ว่าอยู่ห้องไหน — เงื่อนไขอยู่ที่ asset.subLocationId ไม่ใช่ที่ตาราง
+    // ห้องที่ join มา: assetSubLocation ถูก LEFT JOIN ด้วยคีย์ตัวนี้อยู่แล้ว เช็คที่ต้นทาง
+    // จึงได้ผลเดียวกันโดยไม่ต้องพึ่ง join (คิวรีนับข้างล่างไม่ได้ join ตารางห้องด้วยซ้ำ)
+    input.located ? isNotNull(asset.subLocationId) : undefined,
     searchFilter,
   );
+
+  /**
+   * ลำดับของผลลัพธ์
+   *
+   * ★ ปิดท้ายด้วย id เสมอทุกแบบ — คอลัมน์ที่เรียงมีค่าซ้ำกันได้ทั้งสามตัว (ลงทะเบียนวัน
+   *   เดียวกันเป็นล็อต / มูลค่าเท่ากัน / ปีบัญชีเดียวกันเกือบทั้งทะเบียน) ถ้าไม่มีตัวตัดสิน
+   *   สุดท้าย pg ไม่การันตีลำดับของแถวที่เท่ากัน แล้วแถวจะสลับตำแหน่งข้ามหน้า =
+   *   ผู้ใช้เห็นชิ้นเดิมซ้ำในหน้าถัดไปและบางชิ้นหายไปโดยไม่มีอะไรฟ้อง
+   *
+   * ★ NULLS LAST ทั้งสองทิศ — pg ดัน NULL ขึ้นหัวเองเมื่อเรียง DESC ถ้าไม่สั่ง หน้าแรก
+   *   ของการเรียงจะกลายเป็นกองของที่ไม่มีข้อมูล ซึ่งตรงข้ามกับที่คนกดต้องการเห็น
+   * ★ random ชนะทุกอย่าง (หน้า Audit) สองคำสั่งนี้ขัดกันในตัวเอง
+   */
+  // ประกอบเป็นชิ้นเดียวแล้วเสียบเข้าไปทุกแบบ — เขียน ASC/DESC ซ้ำสี่ที่แล้วจะมีที่ลืม
+  const dir = input.sortDir === 'asc' ? sql`ASC NULLS LAST` : sql`DESC NULLS LAST`;
+
+  const orderBy = input.random
+    ? // โหมดสุ่ม (หน้า Audit) — random() ให้ pg เป็นคนสุ่ม ไม่ใช่ดึงมาทั้งกองแล้วสุ่มฝั่ง JS
+      // ซึ่งจะกลายเป็นการอ่าน 2,700 แถวทุกครั้งที่กดปุ่มเพื่อเอาแค่สิบแถว
+      [sql`random()`]
+    : input.sort === 'registered'
+      ? [sql`${asset.sapCreatedDate} ${dir}`, asc(asset.id)]
+      : input.sort === 'netBookValue'
+        ? [sql`${netBookValue} ${dir}`, asc(asset.id)]
+        : input.sort === 'fiscalYear'
+          ? [sql`${assetAccounting.fiscalYear} ${dir}`, asc(asset.id)]
+          : // อายุคงเหลือ — เรียงจากคอลัมน์ตรง ๆ ไม่ได้คิดจาก usefulLife − อายุที่ใช้ไป
+            //   ตัวเลขนี้ SAP เป็นคนคิดให้แล้ว (ITM7.RemainLife) การคิดซ้ำที่นี่จะได้คนละค่า
+            //   กับที่หน้า My Assets แสดง เพราะวิธีตัดเศษเดือนของ SAP ไม่ได้เปิดเผย
+            input.sort === 'remainingLife'
+            ? [sql`${assetAccounting.remainingLifeMonths} ${dir}`, asc(asset.id)]
+            : input.sort === 'assetNumber'
+              ? [sql`${asset.assetNumber} ${dir}`, asc(asset.id)]
+              : [asc(asset.assetNumber), asc(asset.id)];
 
   // นับกับดึงพร้อมกัน — total ต้องเป็นยอดของ "ทั้งชุดที่กรองแล้ว" ไม่ใช่จำนวนแถวในหน้านี้
   const [rows, totalResult] = await Promise.all([
@@ -1104,6 +1497,10 @@ export async function findInventory(input: InventoryListInput): Promise<Paginate
         imageId: asset.imageId,
         status: asset.status,
         acquisitionDate: asset.acquisitionDate,
+        sapCreatedDate: asset.sapCreatedDate,
+        // หมุดบนผัง — หน้า Audit ใช้ชี้ตำแหน่ง หน้าอื่นที่เรียก endpoint นี้ไม่ได้อ่าน
+        posX: asset.posX,
+        posY: asset.posY,
         categoryName: category.name,
         departmentName: department.name,
         locationName: assetLocation.name,
@@ -1112,6 +1509,7 @@ export async function findInventory(input: InventoryListInput): Promise<Paginate
           floor: assetSubLocation.floor,
           room: assetSubLocation.room,
           remark: assetSubLocation.remark,
+          planKey: assetSubLocation.planKey,
         },
         holder: {
           id: employee.id,
@@ -1125,6 +1523,9 @@ export async function findInventory(input: InventoryListInput): Promise<Paginate
           fiscalYear: assetAccounting.fiscalYear,
           bookedCost: assetAccounting.bookedCost,
           accumulatedDepreciation: assetAccounting.accumulatedDepreciation,
+          // ★ ติดมาด้วยเพราะเป็นแกนเรียงหนึ่งของหน้านี้ — เรียงด้วยค่าที่ตารางไม่แสดง
+          //   คนกดจะอ่านผลไม่ออกว่าทำไมลำดับเป็นแบบนั้น (join มีอยู่แล้ว ไม่มีค่าใช้จ่ายเพิ่ม)
+          remainingLifeMonths: assetAccounting.remainingLifeMonths,
         },
       })
       .from(asset)
@@ -1135,12 +1536,13 @@ export async function findInventory(input: InventoryListInput): Promise<Paginate
       .leftJoin(employee, eq(employee.id, asset.employeeId))
       .leftJoin(assetAccounting, eq(assetAccounting.assetId, asset.id))
       .where(where)
-      // ★ ต้องมี id ปิดท้ายเสมอ — เลขสินทรัพย์ซ้ำกันไม่ได้ก็จริง แต่ถ้าวันหลังมีคนเปลี่ยน
-      //   คอลัมน์ที่เรียง แถวที่ค่าเท่ากันจะสลับตำแหน่งข้ามหน้า แล้วผู้ใช้จะเห็นชิ้นเดิมซ้ำ
-      //   ในหน้าถัดไปและมีบางชิ้นหายไปเลยโดยไม่มีอะไรฟ้อง
-      .orderBy(asc(asset.assetNumber), asc(asset.id))
+      // ประกอบไว้ข้างบนแล้ว (ดูคอมเมนต์ที่ orderBy) — ที่นี่แค่กางออก
+      .orderBy(...orderBy)
       .limit(limit)
-      .offset((page - 1) * limit),
+      // ★ สุ่มแล้วต้องเริ่มที่ 0 เสมอ — ทุกคำขอสุ่มลำดับใหม่หมด offset จึงไม่ได้แปลว่า
+      //   "ข้ามของที่เห็นไปแล้ว" แต่เป็นการตัดหัวชุดใหม่ทิ้งเฉย ๆ (ขอ 10 ชิ้นหน้า 2
+      //   จะได้ 10 ชิ้นที่ซ้ำกับหน้า 1 ได้ และของบางชิ้นไม่มีวันถูกสุ่มติดเลย)
+      .offset(input.random ? 0 : (page - 1) * limit),
     // ★ ต้อง join assetAccounting ด้วย ไม่ใช่ .from(asset) เปล่า ๆ — where เดียวกันนี้
     //   อ้างถึงคอลัมน์ของตารางบัญชี (fiscalYear / มูลค่าคงเหลือ) ถ้าไม่ join คิวรีนับจะพัง
     //   ทันทีที่มีคนใช้ตัวกรองสองตัวนั้น ส่วนคิวรีดึงแถวยังทำงานปกติ = เพจไม่มา แต่ตารางมา
@@ -1170,7 +1572,16 @@ export async function findInventory(input: InventoryListInput): Promise<Paginate
       holderName: r.holder?.id ? employeeName(r.holder) : null,
       status: r.status,
       acquisitionDate: r.acquisitionDate,
+      sapCreatedDate: r.sapCreatedDate,
       accounting: toInventoryAccounting(r.accounting),
+      // ★ อ่านจาก r.subLocation?.id ไม่ใช่ r.subLocation?.planKey ตรง ๆ — LEFT JOIN ที่ไม่เจอคู่
+      //   คืนก้อนนี้เป็น null ทั้งก้อนก็จริง แต่ห้องที่มีอยู่จริงแล้ว planKey ว่างก็มี
+      //   (ห้องที่ยังไม่ถูกตีขอบเขตลงผัง) สองกรณีนั้นต่างกันสำหรับคนอ่าน id
+      subLocationId: r.subLocation?.id ?? null,
+      planKey: r.subLocation?.planKey ?? null,
+      floor: r.subLocation?.floor ?? null,
+      posX: r.posX,
+      posY: r.posY,
     }),
   );
 
@@ -1185,11 +1596,18 @@ export async function findInventory(input: InventoryListInput): Promise<Paginate
  * (กติกาเดียวกับ toMyAssetAccounting ข้างบน)
  */
 function toInventoryAccounting(
-  a: { fiscalYear: number; bookedCost: number | null; accumulatedDepreciation: number | null } | null,
+  a: {
+    fiscalYear: number;
+    bookedCost: number | null;
+    accumulatedDepreciation: number | null;
+    remainingLifeMonths: number | null;
+  } | null,
 ) {
   if (a === null) return null;
   return {
     fiscalYear: a.fiscalYear,
+    // ส่งดิบเป็น "เดือน" ตามที่ SAP เก็บ — ฝั่งแสดงผลเป็นคนแปลงเป็น ปี/เดือน เอง
+    remainingLifeMonths: a.remainingLifeMonths,
     netBookValue:
       a.bookedCost === null || a.accumulatedDepreciation === null
         ? null

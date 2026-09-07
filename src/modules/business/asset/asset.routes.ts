@@ -6,8 +6,13 @@ import {
   assetIdParams,
   assetInventoryQuery,
   assetListQuery,
+  assetResolveNumberQuery,
   createAssetBody,
+  roomAssetsParams,
+  roomAssetsQuery,
   updateAssetBody,
+  updateAssetImageBody,
+  updateAssetLocationBody,
 } from './asset.schema';
 import * as assetService from './asset.service';
 import { authGuard } from '@plugins/auth';
@@ -32,6 +37,13 @@ export const assetRoutes = new Elysia({ prefix: '/assets' })
   .get('/inventory', ({ query }) => assetService.findInventory(query), {
     query: assetInventoryQuery,
   })
+  // ของที่ตั้งอยู่ในห้องหนึ่ง — หน้าแผนผังใช้ (0024)
+  // path ขึ้นต้นด้วยส่วนคงที่ 'by-room' จึงไม่ชนกับ /:id ที่รับเลข
+  .get(
+    '/by-room/:subLocationId',
+    ({ params, query }) => assetService.findByRoom(params.subLocationId, query),
+    { params: roomAssetsParams, query: roomAssetsQuery },
+  )
   .get('/:id', ({ params }) => assetService.findOneOrFail(params.id), { params: assetIdParams })
   .post('/', ({ body, currentUser }) => assetService.create(body, currentUser.id), {
     body: createAssetBody,
@@ -40,6 +52,27 @@ export const assetRoutes = new Elysia({ prefix: '/assets' })
     params: assetIdParams,
     body: updateAssetBody,
   })
+  // ย้ายที่ตั้งบนผังของชิ้นที่ลงทะเบียนแล้ว — เส้นเดียวที่ REGISTERED แก้ได้ (ดู updateLocation)
+  //
+  // ★ ต้องแยกเส้น ไม่ใช่ผ่อนด่านใน PATCH /:id — สามช่องนี้ AMS เป็นเจ้าของฝ่ายเดียว
+  //   ส่วนช่องอื่นยังเป็นของ SAP และต้อง "แก้ที่ SAP" เหมือนเดิม การรวมสองกติกาไว้ในเส้น
+  //   เดียวแปลว่าใครแก้ด่านนั้นทีหลังจะเผลอปลดล็อกช่องที่ SAP ทับกลับมาทุกรอบ sync
+  //
+  // ไม่มี requireRole — ตรงกับ PATCH /:id ที่อยู่หลัง authGuard เฉย ๆ เหมือนกัน
+  // (คนที่ตามหาเครื่องเจอว่ามันถูกย้ายห้อง มักไม่ใช่คนแผนกเดียวกับที่ของสังกัดอยู่ —
+  //  เหตุผลเดียวกับที่ GET /assets/inventory เปิดให้ทุก role)
+  .patch(
+    '/:id/location',
+    ({ params, body, currentUser }) => assetService.updateLocation(params.id, body, currentUser.id),
+    { params: assetIdParams, body: updateAssetLocationBody },
+  )
+  // เปลี่ยนรูปของชิ้นที่ลงทะเบียนแล้ว — เหตุผลชุดเดียวกับ /:id/location ข้างบน
+  // (imageId ไม่อยู่ใน set: ของ SAP connector = AMS เป็นเจ้าของ sync ไม่เคยทับ)
+  .patch(
+    '/:id/image',
+    ({ params, body, currentUser }) => assetService.updateImage(params.id, body, currentUser.id),
+    { params: assetIdParams, body: updateAssetImageBody },
+  )
   .delete('/:id', ({ params, currentUser }) => assetService.softDelete(params.id, currentUser.id), {
     params: assetIdParams,
   });
@@ -50,9 +83,12 @@ export const assetRoutes = new Elysia({ prefix: '/assets' })
  * คนที่สแกนคือคนที่ยืนอยู่หน้าเครื่องจริง ซึ่งอาจไม่มีบัญชีในระบบเลย (ช่างที่มาซ่อม/ผู้รับเหมา)
  * ถ้าบังคับล็อกอินก่อน สติกเกอร์จะใช้ไม่ได้กับคนกลุ่มนั้นทั้งหมด
  *
- * ★ แลกกับการเปิดสาธารณะ: **ตัวเลขเงินขึ้นเฉพาะคนที่ล็อกอินแล้ว** (ดู findByAssetNumber)
- *   URL เดาได้ไม่ยากถ้ารู้รูปแบบเลข ปล่อยราคาทุน/ค่าเสื่อม/มูลค่าคงเหลือให้คนนอกเห็น
- *   = เปิดมูลค่าทรัพย์สินทั้งบริษัทให้ใครก็ได้ไล่ดูทีละชิ้น
+ * ★ **ตัวเลขเงินเปิดให้เห็นด้วย ไม่ได้ซ่อนจากคนที่ไม่ได้ล็อกอิน** — ตัดสินใจไว้แบบนั้น
+ *   (คอมเมนต์เดิมตรงนี้เขียนว่าซ่อน ซึ่งไม่ตรงกับโค้ด: findByAssetNumber ไม่รับพารามิเตอร์
+ *   ผู้ใช้เลยและคืน acquisitionCost/accounting เสมอ — แก้ข้อความให้ตรงกับของจริง)
+ *   เหตุผล: หน้านี้ "อ่านอย่างเดียว" แก้อะไรไม่ได้ และคนที่ยืนอยู่หน้าเครื่องจริงเห็นตัวเครื่อง
+ *   อยู่แล้ว ถ้าวันไหนตัดสินใจใหม่ ต้องส่ง currentUser เข้า service แล้วตัดฟิลด์ที่นั่น
+ *   ไม่ใช่ซ่อนที่หน้าจอ (เส้น API ยังเปิดอยู่)
  *
  * เลขมาทาง query ไม่ใช่ path เพราะเลขจริงบางตัวมี '/' (MAC-212-13-001/1) ซึ่ง %2F ใน path
  * เจอ router/proxy ที่ decode ก่อน match แล้วแตกเป็นสอง segment → 404 โดยไม่มีอะไรบอก
@@ -60,4 +96,9 @@ export const assetRoutes = new Elysia({ prefix: '/assets' })
 export const assetPublicRoutes = new Elysia({ prefix: '/assets' })
   .get('/by-number', ({ query }) => assetService.findByAssetNumber(query.number, query.company), {
     query: assetByNumberQuery,
+  })
+  // กู้ QR รูปแบบเก่าที่ไม่มีรหัสบริษัทใน URL — คืนแค่ "เลขนี้เป็นของบริษัทไหนบ้าง"
+  // ต้องอยู่ในชุดสาธารณะเหมือน by-number: คนที่สแกนสติกเกอร์เก่ายังไม่ได้ล็อกอินเหมือนกัน
+  .get('/resolve-number', ({ query }) => assetService.resolveAssetNumber(query.number), {
+    query: assetResolveNumberQuery,
   });
